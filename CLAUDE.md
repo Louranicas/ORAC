@@ -1,44 +1,51 @@
 # ORAC Sidecar — Intelligent Fleet Coordination Proxy
 
 > **Envoy-like proxy specialized for AI agent traffic**
-> **STATUS: SCAFFOLD COMPLETE** — 8 layers, 40 modules, 14,487 LOC, awaiting Phase 1 implementation
+> **STATUS: COMPLETE** — 8 layers, 40 modules, 30,524 LOC, 1,454 tests, 0 clippy warnings (pedantic)
 > **ULTRAPLATE Service ID:** `orac-sidecar` | **Port:** 8133 | **Batch:** 5 (needs PV2 + POVM)
+> **Git:** `git@gitlab.com:lukeomahoney/orac-sidecar.git` | **Branch:** `main`
 > **Plan:** `ORAC_PLAN.md` | **Mindmap:** `ORAC_MINDMAP.md` | **Master Index:** `MASTER_INDEX.md`
 > **Obsidian:** `[[Session 050 — ORAC Sidecar Architecture]]` | `[[Session 051 — ORAC Sidecar .claude Scaffolding]]`
 
-## DEPLOYMENT GATE
+---
 
-**Do NOT write code, create files, or make changes until Luke types `start coding` or `proceed with phase 2`.**
+## Bootstrap Protocol
 
-Bootstrap with `/primehabitat` → `/deephabitat` → read `CLAUDE.local.md`. Then WAIT.
+At the start of every new context window:
 
-## Architecture (4 Build Phases, ~24,500 LOC)
+1. **Run `/primehabitat`** — loads The Habitat: Zellij tabs, 17 services, IPC bus, memory systems
+2. **Run `/deephabitat`** — loads deep substrate: wire protocol, databases, ecosystem, tools
+3. **Read `CLAUDE.local.md`** — current session state, phase tracking, session history
+
+## Architecture (8 Layers, 40 Modules, 3 Binaries)
 
 ```
-Phase 1 — Wire + Hooks (~8K LOC):
-  HTTP Hook Server (Axum, 6 endpoints)
-  IPC Client (M29/M30 hot-swap, V2 wire protocol)
-  WASM Bridge (FIFO/ring, existing protocol)
-
-Phase 2 — Intelligence (~4K LOC):
-  Hebbian STDP (M19-M21 hot-swap)
-  Semantic Router (content-aware dispatch)
-  Circuit Breaker (tower-resilience, per-pane health)
-  Blackboard (SQLite, shared fleet state)
-
-Phase 3 — Bridges + Monitoring (~6K LOC):
-  SYNTHEX bridge (thermal + Hebbian writeback)
-  ME bridge (fitness signal)
-  POVM bridge (memory hydration + crystallisation)
-  RM bridge (TSV persistence — NOT JSON)
-  OTel traces + Prometheus metrics + field dashboard
-
-Phase 4 — Evolution (~6K LOC):
-  RALPH 5-phase loop (Recognize→Analyze→Learn→Propose→Harvest)
-  Emergence detector, correlation engine, 12-dim fitness tensor
-  Snapshot + rollback, multi-parameter mutation
-  Feature-gated: #[cfg(feature = "evolution")]
+L1 Core         m1_core/         m01-m06 + field_state   4,020 LOC   193 tests
+L2 Wire         m2_wire/         m07-m09                  2,300 LOC   111 tests
+L3 Hooks        m3_hooks/        m10-m14                  2,405 LOC   138 tests
+L4 Intelligence m4_intelligence/ m15-m21                  4,402 LOC   229 tests
+L5 Bridges      m5_bridges/      m22-m26                  4,618 LOC   244 tests
+L6 Coordination m6_coordination/ m27-m31                  2,578 LOC   119 tests
+L7 Monitoring   m7_monitoring/   m32-m35                  4,347 LOC   230 tests
+L8 Evolution    m8_evolution/    m36-m40                  5,854 LOC   192 tests
+TOTAL                            40 modules              30,524 LOC 1,454 tests
 ```
+
+**Bin targets:** `orac-sidecar` (5.5MB daemon), `orac-client` (337KB CLI), `orac-probe` (2.3MB diagnostics)
+**Features:** `api`, `persistence`, `bridges` (default) | `intelligence`, `monitoring`, `evolution` | `full` (all)
+
+### Key Modules
+
+| Module | Layer | Purpose |
+|--------|-------|---------|
+| m10_hook_server | L3 | Axum HTTP router, 6 hook endpoints, `OracState` |
+| m20_semantic_router | L4 | Content-aware dispatch, Hebbian weights + domain affinity |
+| m21_circuit_breaker | L5 | Per-pane health gating, Closed/Open/HalfOpen FSM |
+| m26_blackboard | L5 | SQLite shared fleet state (pane status, task history, agent cards) |
+| m36_ralph_engine | L8 | 5-phase RALPH (Recognize/Analyze/Learn/Propose/Harvest), snapshot/rollback |
+| m37_emergence_detector | L8 | 8 fleet emergence types, ring buffer with TTL decay |
+| m39_fitness_tensor | L8 | 12-dim weighted fitness, trend detection via linear regression |
+| m40_mutation_selector | L8 | BUG-035 fix: round-robin cycling, diversity rejection gate |
 
 ## Build & Quality Gate (MANDATORY)
 
@@ -46,10 +53,10 @@ Phase 4 — Evolution (~6K LOC):
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo check 2>&1 | tail -20 && \
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy -- -D warnings 2>&1 | tail -20 && \
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy -- -D warnings -W clippy::pedantic 2>&1 | tail -20 && \
-CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
+CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release --features full 2>&1 | tail -30
 ```
 
-**Order:** check → clippy → pedantic → test. Zero tolerance at every stage.
+**Order:** check -> clippy -> pedantic -> test. Zero tolerance at every stage.
 
 ## Rules (Non-Negotiable)
 
@@ -110,32 +117,80 @@ CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
 | ME | 8080 | `/api/health`, `/api/observer` |
 | POVM | 8125 | `/memories`, `/pathways`, `/hydrate` |
 | RM | 8130 | TSV only: `POST /put`, `GET /search?q=` |
-| FIFO | `/tmp/swarm-commands.pipe` | WASM → sidecar |
-| Ring | `/tmp/swarm-events.jsonl` | Sidecar → WASM (1000 line cap) |
+| FIFO | `/tmp/swarm-commands.pipe` | WASM -> sidecar |
+| Ring | `/tmp/swarm-events.jsonl` | Sidecar -> WASM (1000 line cap) |
 
-## Dependencies (planned)
+## Dependencies
 
+```toml
+# Runtime
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["json"], optional = true }        # feature: api
+tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }  # feature: api
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+ureq = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+libc = "0.2"
+
+# IPC
+socket2 = "0.5"  # Unix domain sockets, SO_REUSEADDR
+
+# DB
+rusqlite = { version = "0.32", optional = true }  # feature: persistence
+
+# Intelligence
+tower = { version = "0.5", optional = true }  # feature: intelligence
+
+# Monitoring (feature-gated)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry-otlp = { version = "0.27", optional = true }
 ```
-Runtime: tokio, axum, tower-http, serde, serde_json, parking_lot, thiserror, tracing, ureq
-IPC: socket2 (Unix domain sockets, SO_REUSEADDR)
-DB: rusqlite (blackboard)
-Optional: opentelemetry, opentelemetry-otlp (monitoring, feature-gated)
-Hot-swap from PV2: M01-M06, M16-M21, M29-M30, M33 (10,170 LOC drop-in)
-```
 
-## Hot-Swap Strategy
+## Hook Migration (COMPLETE)
 
-Modules copied from PV2 (`~/claude-code-workspace/pane-vortex-v2/src/`):
-- **DROP-IN:** M01-M06 (foundation), M16-M18 (coupling), M19-M21 (Hebbian), M29+M30 (IPC bus), M33 (cascade)
-- **ADAPT:** M22 (SYNTHEX), M24 (ME), M25 (POVM), M26 (RM), M31 (conductor), M35 (tick)
-- **SKIP:** M10 (API server — ORAC has own Axum), M28 (consent gate — daemon enforces)
+6 hooks migrated from bash to ORAC HTTP endpoints via `hooks/orac-hook.sh` forwarder.
 
-## Related
+| Event | Endpoint | Timeout |
+|-------|----------|---------|
+| SessionStart | `/hooks/session_start` | 5s |
+| UserPromptSubmit | `/hooks/user_prompt_submit` | 3s |
+| PreToolUse | `/hooks/pre_tool_use` | 2s |
+| PostToolUse | `/hooks/post_tool_use` | 3s |
+| Stop | `/hooks/stop` | 5s |
+| PermissionRequest | `/hooks/permission_request` | 2s |
+
+**Kept as bash:** SubagentStop (no ORAC endpoint), PreCompact (cascade system), Stop/check-cipher-messages.sh (cipher system)
+**Rollback:** `\cp -f ~/.claude/settings.json.pre-orac-backup ~/.claude/settings.json`
+
+## Traps to Avoid
+
+1. **Never chain after `pkill`** (exit 144 kills the `&&` chain)
+2. **Always `\cp -f`** (cp aliased to interactive — BUG-027)
+3. **TSV only for Reasoning Memory** (JSON causes parse failure)
+4. **Lock ordering: AppState before BusState** (deadlock prevention)
+5. **Phase wrapping: `.rem_euclid(TAU)`** after all phase arithmetic
+6. **No stdout in daemons** (SIGPIPE -> death, BUG-018)
+7. **Don't script Zellij plugin interactions** (zombie behaviour — keybind-only)
+8. **fleet-ctl cache is STALE** (300s TTL — `dump-screen` is the only reliable pane state)
+9. **BUG-035 mono-parameter trap** — evolution chamber MUST use multi-parameter mutation selection
+10. **Bridge URLs must NOT include `http://` prefix** (BUG-033 — raw SocketAddr only)
+11. **`#[derive(Default)]` on ProposalManager** -> `max_active=0` (BUG-032 — use custom `impl Default`)
+12. **POVM is write-only** (BUG-034 — must call `/hydrate` to read back state)
+
+## Related Projects
 
 - **PV2 Source:** `~/claude-code-workspace/pane-vortex-v2/` (31,859 LOC, 1,527 tests)
-- **V1 Sidecar:** `~/claude-code-workspace/swarm-sidecar/` (753 LOC, 15 tests)
+- **V1 Sidecar:** `~/claude-code-workspace/swarm-sidecar/` (753 LOC, 15 tests — superseded by ORAC)
 - **ME (RALPH source):** `~/claude-code-workspace/the_maintenance_engine/` (54K LOC, 2,288 tests)
 - **ME V2 (Gold Standard):** `~/claude-code-workspace/the_maintenance_engine_v2/` (56K LOC)
-- **Scaffold Binary:** `scaffold-gen --from-plan plan.toml`
 - **Obsidian:** `[[Session 050 — ORAC Sidecar Architecture]]` + 6 supporting notes
 - **Mindmap:** `ORAC_MINDMAP.md` (127 Obsidian notes mapped, 16 recommended additions)

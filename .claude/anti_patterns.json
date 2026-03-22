@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "source": "PV2 (15 anti-patterns) + ORAC-specific sidecar traps",
+  "anti_patterns": [
+    {"id": "AP01", "name": "unwrap in production", "severity": "CRITICAL", "rule": "NEVER use .unwrap() or .expect() outside #[cfg(test)]", "origin": "PV2"},
+    {"id": "AP02", "name": "unsafe blocks", "severity": "CRITICAL", "rule": "Zero tolerance for unsafe. No exceptions.", "origin": "PV2"},
+    {"id": "AP03", "name": "pkill chain", "severity": "HIGH", "rule": "NEVER chain after pkill — exit 144 kills && chains", "origin": "PV2"},
+    {"id": "AP04", "name": "cp alias", "severity": "HIGH", "rule": "Always \\cp -f — cp is aliased to interactive mode", "origin": "PV2"},
+    {"id": "AP05", "name": "JSON to RM", "severity": "HIGH", "rule": "Reasoning Memory uses TSV format ONLY, never JSON", "origin": "PV2"},
+    {"id": "AP06", "name": "stdout in daemon", "severity": "HIGH", "rule": "Never write to stdout in daemons — SIGPIPE kills (BUG-018)", "origin": "PV2"},
+    {"id": "AP07", "name": "git status -uall", "severity": "MEDIUM", "rule": "Causes memory issues on large repos", "origin": "PV2"},
+    {"id": "AP08", "name": "byte slice truncation", "severity": "MEDIUM", "rule": "UTF-8 byte slicing panics on multi-byte chars", "origin": "PV2"},
+    {"id": "AP09", "name": "unbounded Vec for logs", "severity": "MEDIUM", "rule": "Use VecDeque with cap, not growing Vec", "origin": "PV2"},
+    {"id": "AP10", "name": "no heartbeat check", "severity": "HIGH", "rule": "Spheres with heartbeat=0.0 must be swept immediately", "origin": "PV2"},
+    {"id": "AP11", "name": "code modification without reading", "severity": "CRITICAL", "rule": "ALWAYS read a file before modifying it", "origin": "PV2"},
+    {"id": "AP12", "name": "mono-parameter mutation (BUG-035)", "severity": "CRITICAL", "rule": "Evolution chamber MUST NOT select same parameter repeatedly. ME had 84% targeting min_confidence. Use diversity-enforced round-robin with 10-gen cooldown.", "origin": "ORAC"},
+    {"id": "AP13", "name": "bridge URL http prefix (BUG-033)", "severity": "HIGH", "rule": "Bridge URLs must NOT include http:// prefix — raw SocketAddr only", "origin": "ORAC"},
+    {"id": "AP14", "name": "Default ProposalManager (BUG-032)", "severity": "HIGH", "rule": "#[derive(Default)] on ProposalManager sets max_active=0 — use custom impl Default", "origin": "ORAC"},
+    {"id": "AP15", "name": "POVM write-only (BUG-034)", "severity": "HIGH", "rule": "POVM bridge must call /hydrate to read back state — write alone does nothing observable", "origin": "ORAC"},
+    {"id": "AP16", "name": "blocking in hook handler", "severity": "CRITICAL", "rule": "NEVER block in HTTP hook handler — async only, sub-ms response required", "origin": "ORAC"},
+    {"id": "AP17", "name": "tight IPC reconnect loop", "severity": "HIGH", "rule": "Never tight-loop reconnect to PV2 socket — use exponential backoff 100ms→5s", "origin": "ORAC"},
+    {"id": "AP18", "name": "hook fail-closed on bridge down", "severity": "HIGH", "rule": "PreToolUse thermal gate must fail-OPEN if SYNTHEX is down — never block agent work due to bridge failure", "origin": "ORAC"},
+    {"id": "AP19", "name": "emergence cap exhaustion", "severity": "HIGH", "rule": "RALPH emergence ring buffer must have TTL decay — cap alone leads to BUG-035 deadlock", "origin": "ORAC"},
+    {"id": "AP20", "name": "global k_mod without consent", "severity": "HIGH", "rule": "Never modify k_mod without consent gate and per-sphere option", "origin": "PV2"}
+  ]
+}

@@ -1,0 +1,39 @@
+%%{ init: { 'theme': 'dark' } }%%
+graph LR
+    subgraph "Source"
+        PV2["Pane-Vortex 2<br/>:8132"]
+    end
+
+    subgraph "ORAC :8133"
+        FC["Field Cache<br/>m29 tick"]
+        MET["Metrics Collector<br/>m33 metrics"]
+        DASH["Dashboard Aggregator<br/>m34 dashboard"]
+        PROM["/metrics endpoint<br/>Prometheus format"]
+    end
+
+    subgraph "Consumers"
+        PMSRV["Prometheus<br/>scrape"]
+        PANEL["Dashboard Pane<br/>terminal UI"]
+        OTEL["OTel Collector<br/>m32 traces"]
+    end
+
+    PV2 -->|"GET /field/state<br/>every tick"| FC
+    FC -->|"order_parameter<br/>k_effective<br/>sphere_count"| MET
+    FC -->|"phase_distribution<br/>chimera_count<br/>tunnel_count"| DASH
+
+    MET -->|"counters<br/>gauges<br/>histograms"| PROM
+    PROM -->|"HTTP scrape<br/>:8133/metrics"| PMSRV
+
+    DASH -->|"aggregated JSON"| PANEL
+
+    MET -->|"spans + metrics"| OTEL
+
+    subgraph "Tracked Metrics"
+        direction TB
+        G1["orac_field_order_parameter (gauge)"]
+        G2["orac_field_k_effective (gauge)"]
+        C1["orac_requests_total (counter)"]
+        H1["orac_request_duration_ms (histogram)"]
+        G3["orac_bridge_health (gauge per bridge)"]
+        G4["orac_tokens_consumed (counter per agent)"]
+    end

@@ -10,13 +10,11 @@
 //! Data: 3,250 active entries, 67% are PV `field_state` entries.
 //! V3.5.1 will reduce TTL to curb noise.
 //!
-//! ## ADAPT for ORAC
-//! This module needs adaptation for ORAC deployment:
-//! - Port may change from 8130 (configurable via `with_config`)
-//! - Socket address format must remain `host:port` (no `http://` prefix, BUG-033)
-//! - Poll interval may need tuning for sidecar tick rate
-//! - Agent name should change from `"pane-vortex"` to `"orac-sidecar"`
-//! - **Critical**: Content-Type MUST be `text/tab-separated-values`, never JSON
+//! ## ORAC Adaptations (applied)
+//! - Port configurable via `with_config` (default 8130)
+//! - Socket address: raw `host:port` (no `http://` prefix, BUG-033)
+//! - Agent name: `"orac-sidecar"` (not `"pane-vortex"`)
+//! - Content-Type: `text/tab-separated-values` (NEVER JSON)
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -63,7 +61,7 @@ const TAB: char = '\t';
 const DEFAULT_FIELD_STATE_TTL: u64 = 300;
 
 /// Default agent name for PV entries.
-const DEFAULT_AGENT: &str = "pane-vortex";
+const DEFAULT_AGENT: &str = "orac-sidecar";
 
 // ──────────────────────────────────────────────────────────────
 // TSV record types
@@ -660,9 +658,9 @@ mod tests {
 
     #[test]
     fn record_to_tsv_format() {
-        let r = RmRecord::new("field_state", "pane-vortex", 0.95, 300, "r=0.93 k=1.0");
+        let r = RmRecord::new("field_state", "orac-sidecar", 0.95, 300, "r=0.93 k=1.0");
         let tsv = r.to_tsv();
-        assert_eq!(tsv, "field_state\tpane-vortex\t0.95\t300\tr=0.93 k=1.0");
+        assert_eq!(tsv, "field_state\torac-sidecar\t0.95\t300\tr=0.93 k=1.0");
     }
 
     #[test]

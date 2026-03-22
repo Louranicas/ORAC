@@ -1,0 +1,1 @@
+../../primehabitat/scripts/probe.sh

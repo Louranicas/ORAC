@@ -11,12 +11,11 @@
 //! distribution) and 36 memories. This bridge snapshots field state on writes
 //! and hydrates Hebbian weights on startup.
 //!
-//! ## ADAPT for ORAC
-//! This module needs adaptation for ORAC deployment:
-//! - Port may change from 8125 (configurable via `with_config`)
-//! - Socket address format must remain `host:port` (no `http://` prefix, BUG-033)
-//! - Write and read intervals may need tuning for sidecar tick rate
-//! - POVM is write-only by default; must call `/hydrate` to read back (BUG-034)
+//! ## ORAC Adaptations (applied)
+//! - Port configurable via `with_config` (default 8125)
+//! - Socket address: raw `host:port` (no `http://` prefix, BUG-033)
+//! - Write interval: 12 ticks, read interval: 60 ticks (configurable)
+//! - POVM is write-only; must call `/hydrate` to read back (BUG-034)
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

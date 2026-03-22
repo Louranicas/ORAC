@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BusEvent",
+  "description": "Event types emitted on the PV IPC bus (24 types, 5 namespaces). ORAC subscribes to these via IPC client.",
+  "type": "object",
+  "required": ["event_type", "tick"],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "task.submitted", "task.available", "task.claimed", "task.completed", "task.failed", "task.expired",
+        "field.tick", "field.decision", "field.sync", "field.desync", "field.chimera_detected", "field.chimera_resolved",
+        "conductor.scale_k", "conductor.inject_phase", "conductor.dampen", "conductor.cruise", "conductor.emergency",
+        "sphere.registered", "sphere.deregistered", "sphere.status_change", "sphere.tunnel_formed", "sphere.tunnel_broken",
+        "bus.connect", "bus.disconnect"
+      ]
+    },
+    "tick": {"type": "integer", "minimum": 0},
+    "source": {"type": ["string", "null"], "maxLength": 128},
+    "payload": {"type": "object"},
+    "timestamp": {"type": "string", "format": "date-time"}
+  }
+}

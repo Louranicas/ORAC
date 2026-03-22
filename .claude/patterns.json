@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "source": "PV2 (15 patterns) + ORAC-specific hook/proxy patterns",
+  "patterns": [
+    {"id": "P01", "name": "Phase wrapping", "priority": "P0", "rule": "Always .rem_euclid(TAU) after phase arithmetic", "origin": "PV2"},
+    {"id": "P02", "name": "Error propagation", "priority": "P0", "rule": "? operator with OracError, never panic", "origin": "PV2"},
+    {"id": "P03", "name": "Fire-and-forget bridge", "priority": "P0", "rule": "Raw TCP HTTP, tokio::spawn, no blocking", "origin": "PV2"},
+    {"id": "P04", "name": "Feature gates", "priority": "P0", "rule": "#[cfg(feature)] for evolution, monitoring, intelligence", "origin": "PV2"},
+    {"id": "P05", "name": "Borrow extraction", "priority": "P0", "rule": "Extract values before cross-field mutations", "origin": "PV2"},
+    {"id": "P06", "name": "NaN guard", "priority": "P0", "rule": "is_finite() check on all phase/frequency updates", "origin": "PV2"},
+    {"id": "P07", "name": "Saturating arithmetic", "priority": "P0", "rule": "saturating_mul/add for counters to prevent overflow", "origin": "PV2"},
+    {"id": "P08", "name": "Frequency clamp", "priority": "P0", "rule": "Clamp to [0.001, 10.0] on all frequency updates", "origin": "PV2"},
+    {"id": "P09", "name": "Amortised prune", "priority": "P1", "rule": "Batch prune at threshold+50, not every tick", "origin": "PV2"},
+    {"id": "P10", "name": "VecDeque for logs", "priority": "P1", "rule": "VecDeque with cap, not Vec for message/event logs", "origin": "PV2"},
+    {"id": "P11", "name": "Chars not bytes", "priority": "P1", "rule": "chars().take(N) for string truncation, not byte slicing", "origin": "PV2"},
+    {"id": "P12", "name": "SIGTERM handler", "priority": "P1", "rule": "tokio::signal::unix for graceful shutdown with timeout", "origin": "PV2"},
+    {"id": "P13", "name": "WAL mode", "priority": "P1", "rule": "PRAGMA journal_mode=WAL on all SQLite connections", "origin": "PV2"},
+    {"id": "P14", "name": "Hook sub-ms response", "priority": "P0", "rule": "Hook endpoints must respond in <1ms — local memory only, no external calls in hot path", "origin": "ORAC"},
+    {"id": "P15", "name": "Permission policy cascade", "priority": "P0", "rule": "Check sphere-specific → fleet-wide → default policy, in that order", "origin": "ORAC"},
+    {"id": "P16", "name": "Hook idempotency", "priority": "P0", "rule": "Hook handlers must be idempotent — same hook_id processed twice = same result", "origin": "ORAC"},
+    {"id": "P17", "name": "IPC reconnect backoff", "priority": "P0", "rule": "Exponential backoff 100ms→5s on PV2 socket reconnect, not tight loop", "origin": "ORAC"},
+    {"id": "P18", "name": "Thermal gate passthrough", "priority": "P1", "rule": "PreToolUse thermal gate returns 'approve' if SYNTHEX bridge is down — fail open, not closed", "origin": "ORAC"},
+    {"id": "P19", "name": "Bridge staleness bitfield", "priority": "P1", "rule": "BridgeStaleness uses u8 bitfield, not 6-bool struct (gold standard refactor)", "origin": "ORAC"},
+    {"id": "P20", "name": "Multi-parameter mutation", "priority": "P0", "rule": "Evolution chamber MUST use diversity-enforced selection: round-robin, 10-gen cooldown, 50% diversity cap", "origin": "ORAC", "ref": "BUG-035"},
+    {"id": "P21", "name": "Consent gate stub", "priority": "P1", "rule": "Every bridge module includes _consent_check() stub for future active consent (NA-P-1)", "origin": "ORAC"},
+    {"id": "P22", "name": "Ring file cap", "priority": "P1", "rule": "WASM ring file capped at 1000 lines — truncate from head when exceeded", "origin": "ORAC"}
+  ]
+}

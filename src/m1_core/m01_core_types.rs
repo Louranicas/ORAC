@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// Unique pane identifier (e.g. "fleet-alpha:left", "claude:session-039").
 ///
 /// Newtype wrapper around `String` for type safety at API boundaries.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PaneId(String);
 
 impl PaneId {

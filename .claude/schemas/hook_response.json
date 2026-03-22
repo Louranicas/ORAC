@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Claude Code Hook Response",
+  "description": "Response payload returned by ORAC hook endpoints to Claude Code.",
+  "type": "object",
+  "required": ["decision"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["approve", "deny", "skip"],
+      "description": "The hook decision: approve proceeds, deny blocks with reason, skip passes through."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable explanation for the decision (required when decision is 'deny')."
+    },
+    "inject": {
+      "type": "string",
+      "description": "Optional text to inject into the conversation context after the hook fires."
+    }
+  },
+  "additionalProperties": false
+}

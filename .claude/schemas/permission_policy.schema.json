@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ORAC Permission Policy",
+  "description": "Permission auto-approve/deny policy configuration. Eliminates fleet permission dialog spam.",
+  "type": "object",
+  "required": ["default_action"],
+  "properties": {
+    "default_action": {
+      "type": "string",
+      "enum": ["approve", "deny", "prompt"],
+      "description": "Default action when no specific rule matches."
+    },
+    "fleet_rules": {
+      "type": "array",
+      "description": "Fleet-wide permission rules (checked before per-sphere rules).",
+      "items": {
+        "type": "object",
+        "required": ["tool_pattern", "action"],
+        "properties": {
+          "tool_pattern": {"type": "string", "description": "Glob pattern for tool names (e.g., 'Bash', 'Read', 'Edit')."},
+          "action_pattern": {"type": "string", "description": "Glob pattern for action type."},
+          "target_pattern": {"type": "string", "description": "Glob pattern for target path/URL."},
+          "action": {"type": "string", "enum": ["approve", "deny", "prompt"]},
+          "reason": {"type": "string", "description": "Human-readable justification for this rule."}
+        }
+      }
+    },
+    "sphere_overrides": {
+      "type": "object",
+      "description": "Per-sphere permission overrides. Key is sphere_id.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["tool_pattern", "action"],
+              "properties": {
+                "tool_pattern": {"type": "string"},
+                "action": {"type": "string", "enum": ["approve", "deny", "prompt"]}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

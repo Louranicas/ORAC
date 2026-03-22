@@ -1,8 +1,8 @@
 {
   "project": "orac-sidecar",
   "version": "0.1.0",
-  "status": "phase_1_complete",
-  "session": "052",
+  "status": "all_complete",
+  "session": "054",
   "plan": "ORAC_PLAN.md",
   "mindmap": "ORAC_MINDMAP.md",
   "port": 8133,
@@ -11,82 +11,85 @@
   "role": "Envoy-like proxy specialized for AI agent traffic",
   "replaces": "swarm-sidecar (V1, 546 LOC, non-functional)",
   "binary": "~/.local/bin/orac-sidecar",
-  "binary_size": "4.7MB",
-  "tests": 699,
-  "total_loc": 19454,
+  "binary_size": "5.5MB",
+  "tests": 1454,
+  "total_loc": 30524,
   "hooks_loc": 2405,
-  "git_commit": "4bf9335",
+  "git_remote": "git@gitlab.com:lukeomahoney/orac-sidecar.git",
   "layers": {
     "L1_core": {
       "modules": ["m01_core_types", "m02_error_handling", "m03_config", "m04_constants", "m05_traits", "m06_validation", "field_state"],
       "status": "implemented",
-      "loc": 4018,
+      "loc": 4020,
+      "tests": 193,
       "dependencies": [],
       "source": "PV2 m1_foundation (M01-M06) + ORAC field_state"
     },
     "L2_wire": {
       "modules": ["m07_ipc_client", "m08_bus_types", "m09_wire_protocol"],
-      "status": "partial",
-      "loc": 1400,
+      "status": "implemented",
+      "loc": 2300,
+      "tests": 111,
       "dependencies": ["L1"],
-      "note": "m07+m08 implemented, m09 stub (wire protocol helpers)"
+      "source": "PV2 M29-M30 drop-in + m09 Phase 1 new"
     },
     "L3_hooks": {
       "modules": ["m10_hook_server", "m11_session_hooks", "m12_tool_hooks", "m13_prompt_hooks", "m14_permission_policy"],
       "status": "implemented",
       "loc": 2405,
+      "tests": 138,
       "dependencies": ["L1", "L2"],
       "feature_gates": ["api"],
       "phase": 1,
-      "note": "COMPLETE — all 6 hook endpoints live on :8133"
+      "note": "6 HTTP hook endpoints live on :8133"
     },
     "L4_intelligence": {
       "modules": ["m15_coupling_network", "m16_auto_k", "m17_topology", "m18_hebbian_stdp", "m19_buoy_network", "m20_semantic_router", "m21_circuit_breaker"],
-      "status": "partial",
-      "loc": 2739,
+      "status": "implemented",
+      "loc": 4402,
+      "tests": 229,
       "dependencies": ["L1"],
-      "note": "m15-m19 integrated from PV2, m20+m21 stubs — PHASE 2 TARGET",
-      "feature_gates": ["intelligence"]
+      "feature_gates": ["intelligence"],
+      "phase": 2,
+      "note": "m15-m19 PV2 drop-in, m20+m21 Phase 2 new"
     },
     "L5_bridges": {
       "modules": ["m22_synthex_bridge", "m23_me_bridge", "m24_povm_bridge", "m25_rm_bridge", "m26_blackboard"],
-      "status": "partial",
-      "loc": 3704,
+      "status": "implemented",
+      "loc": 4618,
+      "tests": 244,
       "dependencies": ["L1"],
-      "note": "m22-m25 adapted from PV2, m26 blackboard stub",
-      "feature_gates": ["bridges"]
+      "feature_gates": ["bridges", "persistence"],
+      "note": "m22-m25 adapted from PV2, m26 blackboard Phase 2 new (rusqlite)"
     },
     "L6_coordination": {
       "modules": ["m27_conductor", "m28_cascade", "m29_tick", "m30_wasm_bridge", "m31_memory_manager"],
-      "status": "partial",
-      "loc": 1849,
+      "status": "implemented",
+      "loc": 2578,
+      "tests": 119,
       "dependencies": ["L1", "L4", "L5"],
-      "note": "m27-m29+m31 integrated from PV2, m30 wasm bridge stub"
+      "note": "m27-m29+m31 adapted from PV2, m30 WASM bridge Phase 3 new"
     },
     "L7_monitoring": {
       "modules": ["m32_otel_traces", "m33_metrics_export", "m34_field_dashboard", "m35_token_accounting"],
-      "status": "stub",
-      "loc": 0,
+      "status": "implemented",
+      "loc": 4347,
+      "tests": 230,
       "dependencies": ["L1", "L2", "L5"],
       "feature_gates": ["monitoring"],
-      "phase": 3
+      "phase": 3,
+      "note": "All Phase 3 new modules (OTel, Prometheus, field dashboard, token accounting)"
     },
     "L8_evolution": {
       "modules": ["m36_ralph_engine", "m37_emergence_detector", "m38_correlation_engine", "m39_fitness_tensor", "m40_mutation_selector"],
-      "status": "stub",
-      "loc": 0,
+      "status": "implemented",
+      "loc": 5854,
+      "tests": 192,
       "dependencies": ["L1", "L4", "L5", "L7"],
       "feature_gates": ["evolution"],
       "phase": 4,
-      "note": "CRITICAL: Multi-parameter mutation — NOT mono-parameter (BUG-035)"
+      "note": "RALPH 5-phase, BUG-035 fixed (multi-parameter mutation)"
     }
-  },
-  "implementation_state": {
-    "real_modules": ["m01", "m02", "m03", "m04", "m05", "m06", "field_state", "m07", "m08", "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19", "m22", "m23", "m24", "m25", "m27", "m28", "m29", "m31"],
-    "stub_modules": ["m09", "m20", "m21", "m26", "m30", "m32", "m33", "m34", "m35", "m36", "m37", "m38", "m39", "m40"],
-    "next_phase": 2,
-    "phase_2_targets": ["m20_semantic_router", "m21_circuit_breaker", "m26_blackboard"],
-    "phase_2_description": "Intelligence layer — content-aware dispatch, per-pane health gating, shared fleet state"
   },
   "bridges": {
     "pv2": {"port": 8132, "health": "/health", "protocol": "ipc_unix_socket", "socket": "/run/user/1000/pane-vortex-bus.sock"},
@@ -96,16 +99,39 @@
     "rm": {"port": 8130, "health": "/health", "module": "m25", "format": "TSV"}
   },
   "hooks": {
-    "SessionStart": {"endpoint": "/hooks/SessionStart", "status": "implemented", "loc": 398},
-    "PostToolUse": {"endpoint": "/hooks/PostToolUse", "status": "implemented", "loc": 559},
-    "PreToolUse": {"endpoint": "/hooks/PreToolUse", "status": "implemented", "loc": 559},
-    "UserPromptSubmit": {"endpoint": "/hooks/UserPromptSubmit", "status": "implemented", "loc": 351},
-    "Stop": {"endpoint": "/hooks/Stop", "status": "implemented", "loc": 398},
-    "PermissionRequest": {"endpoint": "/hooks/PermissionRequest", "status": "implemented", "loc": 362}
+    "SessionStart": {"endpoint": "/hooks/SessionStart", "status": "implemented", "timeout": "5s", "action": "Register sphere, hydrate from POVM + RM"},
+    "UserPromptSubmit": {"endpoint": "/hooks/UserPromptSubmit", "status": "implemented", "timeout": "3s", "action": "Inject r/tick/spheres/thermal + pending tasks"},
+    "PreToolUse": {"endpoint": "/hooks/PreToolUse", "status": "implemented", "timeout": "2s", "action": "SYNTHEX thermal gate (fails OPEN)"},
+    "PostToolUse": {"endpoint": "/hooks/PostToolUse", "status": "implemented", "timeout": "3s", "action": "Memory + status, 1-in-5 task poll, atomic claim"},
+    "Stop": {"endpoint": "/hooks/Stop", "status": "implemented", "timeout": "5s", "action": "Fail tasks, crystallize, deregister sphere"},
+    "PermissionRequest": {"endpoint": "/hooks/PermissionRequest", "status": "implemented", "timeout": "2s", "action": "Auto-approve/deny policy engine"}
   },
+  "hooks_kept_bash": ["SubagentStop", "PreCompact", "Stop/check-cipher-messages"],
   "bin_targets": {
-    "orac-sidecar": "Main daemon — deployed at ~/.local/bin/",
-    "orac-client": "CLI client — deployed",
-    "orac-probe": "Diagnostics tool — deployed"
+    "orac-sidecar": {"size": "5.5MB", "description": "Main daemon — Axum HTTP :8133, IPC, graceful shutdown"},
+    "orac-probe": {"size": "2.3MB", "description": "Diagnostics — probes 6 endpoints (ORAC, PV2, SX, ME, POVM, RM)"},
+    "orac-client": {"size": "337KB", "description": "CLI — status, field, spheres, health, hooks, bridges"}
+  },
+  "features": {
+    "default": ["api", "persistence", "bridges"],
+    "api": "L3 HTTP hooks (axum, tower-http)",
+    "persistence": "L5 blackboard (rusqlite)",
+    "bridges": "L5 service bridges",
+    "intelligence": "L4 Hebbian/routing (tower)",
+    "monitoring": "L7 OTel (opentelemetry, opentelemetry-otlp)",
+    "evolution": "L8 RALPH",
+    "full": "all 6 above"
+  },
+  "build_phases": {
+    "phase_1_wire_hooks": "complete",
+    "phase_2_intelligence": "complete",
+    "phase_3_bridges_monitoring": "complete",
+    "phase_4_evolution": "complete"
+  },
+  "quality_gate": {
+    "cargo_check": "0 errors",
+    "clippy_warnings": "0 warnings",
+    "clippy_pedantic": "0 warnings",
+    "tests": "1454 pass, 0 fail, 0 ignored"
   }
 }

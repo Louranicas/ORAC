@@ -1,0 +1,35 @@
+%%{ init: { 'theme': 'dark' } }%%
+sequenceDiagram
+    participant CC as Claude Code
+    participant ORAC as ORAC :8133
+    participant PV2 as Pane-Vortex :8132
+
+    Note over CC,PV2: PreToolUse Flow
+    CC->>ORAC: POST /hooks/pre-tool-use
+    ORAC->>ORAC: m14 middleware: assign RequestId, start tracing span
+    ORAC->>PV2: GET /field/state
+    PV2-->>ORAC: {order_parameter, k_effective, phases}
+    ORAC->>ORAC: m11 pre_tool: inject field context, routing decision
+    ORAC->>ORAC: m18 breaker: check circuit state
+    ORAC->>ORAC: m35 tokens: check budget
+    ORAC-->>CC: 200 {allow: true, headers: {field_context}}
+
+    Note over CC,PV2: PostToolUse Flow
+    CC->>ORAC: POST /hooks/post-tool-use
+    ORAC->>ORAC: m12 post_tool: extract tool outcome
+    ORAC->>PV2: POST /sphere/{id}/tool-use
+    PV2-->>ORAC: 200 {hebbian_updated: true}
+    ORAC->>PV2: POST /sphere/{id}/status
+    PV2-->>ORAC: 200 {status: "working"}
+    ORAC->>ORAC: m15 hebbian: local weight update
+    ORAC->>ORAC: m18 breaker: update failure count
+    ORAC-->>CC: 200 {processed: true}
+
+    Note over CC,PV2: Quality Gate
+    ORAC->>PV2: GET /field/state
+    PV2-->>ORAC: {order_parameter: 0.997}
+    ORAC->>ORAC: m21 decision: evaluate r_trend
+    alt r below threshold
+        ORAC->>PV2: POST /conductor/action
+        PV2-->>ORAC: 200 {action: "reduce_k"}
+    end

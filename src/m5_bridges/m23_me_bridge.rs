@@ -13,12 +13,11 @@
 //! - Falling back to neutral adjustment (1.0) when frozen
 //! - Logging the condition without failing
 //!
-//! ## ADAPT for ORAC
-//! This module needs adaptation for ORAC deployment:
-//! - Port may change from 8080 (configurable via `with_config`)
-//! - Socket address format must remain `host:port` (no `http://` prefix, BUG-033)
-//! - Poll interval may need tuning for sidecar tick rate
-//! - BUG-008 frozen detection thresholds may need re-calibration
+//! ## ORAC Adaptations (applied)
+//! - Port configurable via `with_config` (default 8080)
+//! - Socket address: raw `host:port` (no `http://` prefix, BUG-033)
+//! - Poll interval configurable (default 12 ticks)
+//! - BUG-008 frozen detection: 3 identical polls → neutral fallback
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

@@ -15,6 +15,11 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 
+#[cfg(feature = "persistence")]
+use crate::m1_core::m01_core_types::{PaneId, PaneStatus};
+#[cfg(feature = "persistence")]
+use crate::m5_bridges::m26_blackboard::PaneRecord;
+
 use super::m10_hook_server::{
     fire_and_forget_post, http_get, http_post, HookEvent, HookResponse, OracState,
 };
@@ -66,6 +71,25 @@ pub async fn handle_post_tool_use(
     .to_string();
     fire_and_forget_post(status_url, status_body);
 
+    // 2b. Upsert blackboard pane_status (if persistence enabled)
+    #[cfg(feature = "persistence")]
+    if let Some(ref bb) = state.blackboard {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let record = PaneRecord {
+            pane_id: PaneId::new(&pane_id_str),
+            status: PaneStatus::Working,
+            persona: String::new(),
+            updated_at: now,
+            phase: 0.0,
+            tasks_completed: 0,
+        };
+        if let Err(e) = bb.lock().upsert_pane(&record) {
+            tracing::debug!("blackboard upsert_pane failed: {e}");
+        }
+    }
+
     // 3. Check for TASK_COMPLETE in tool output
     if tool_output.contains("TASK_COMPLETE") {
         if let Some(task_id) = get_active_task(&state, &session_id) {
@@ -98,6 +122,27 @@ pub async fn handle_post_tool_use(
 
         if is_claim_successful(claim_result.as_deref()) {
             set_active_task(&state, &session_id, &task.id);
+
+            // Record claimed task in blackboard
+            #[cfg(feature = "persistence")]
+            if let Some(ref bb) = state.blackboard {
+                use crate::m5_bridges::m26_blackboard::TaskRecord;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f64());
+                let task_record = TaskRecord {
+                    task_id: task.id.clone(),
+                    pane_id: PaneId::new(&pane_id_str),
+                    description: task.description.clone(),
+                    outcome: "claimed".into(),
+                    finished_at: now,
+                    duration_secs: 0.0,
+                };
+                if let Err(e) = bb.lock().insert_task(&task_record) {
+                    tracing::debug!("blackboard insert_task failed: {e}");
+                }
+            }
+
             let message = format!(
                 "[FLEET TASK] Claimed {}: {}. When done, include TASK_COMPLETE in your response.",
                 task.id, task.description,

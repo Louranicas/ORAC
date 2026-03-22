@@ -1,0 +1,33 @@
+%%{ init: { 'theme': 'dark' } }%%
+graph LR
+    ORAC["ORAC Sidecar<br/>:8133"]
+
+    subgraph "ULTRAPLATE Services"
+        SX["SYNTHEX Brain<br/>:8090"]
+        ME["Maintenance Engine<br/>:8080"]
+        POVM["POVM Measurement<br/>:8125"]
+        RM["Reasoning Memory<br/>:8130"]
+        PV2["Pane-Vortex 2<br/>:8132"]
+    end
+
+    subgraph "Consumers"
+        CC["Claude Code<br/>Hooks"]
+        IPC["IPC Clients<br/>Unix Socket"]
+    end
+
+    CC -->|"HTTP hooks"| ORAC
+    IPC -->|"NDJSON"| ORAC
+
+    ORAC -->|"m22: cascade sync<br/>bidirectional"| SX
+    ORAC -->|"m23: health/restart"| ME
+    ORAC -->|"m24: state collapse"| POVM
+    ORAC -->|"m25: TSV put/get"| RM
+    ORAC <-->|"m11/m12: field inject<br/>+ Hebbian update"| PV2
+
+    subgraph "Shared State"
+        BB["m26 Blackboard"]
+    end
+
+    ORAC --- BB
+    SX -.->|"via blackboard"| BB
+    RM -.->|"via blackboard"| BB

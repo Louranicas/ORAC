@@ -1,0 +1,90 @@
+%%{ init: { 'theme': 'dark' } }%%
+graph TB
+    subgraph "L8 Evolution [feature: evolution]"
+        m36[m36 ralph]
+        m37[m37 emergence]
+        m38[m38 correlation]
+        m39[m39 tensor]
+        m40[m40 mutation]
+    end
+
+    subgraph "L7 Monitoring [feature: monitoring]"
+        m32[m32 otel]
+        m33[m33 metrics]
+        m34[m34 dashboard]
+        m35[m35 tokens]
+    end
+
+    subgraph "L6 Coordination [always on]"
+        m27[m27 conductor]
+        m28[m28 cascade]
+        m29[m29 tick]
+        m30[m30 wasm]
+        m31[m31 memory]
+    end
+
+    subgraph "L5 Bridges [feature: bridges]"
+        m22[m22 synthex]
+        m23[m23 maintenance]
+        m24[m24 povm]
+        m25[m25 reasoning]
+        m26[m26 blackboard]
+    end
+
+    subgraph "L4 Intelligence [feature: intelligence]"
+        m15[m15 hebbian]
+        m16[m16 coupling]
+        m17[m17 routing]
+        m18[m18 breaker]
+        m19[m19 phase]
+        m20[m20 chimera]
+        m21[m21 decision]
+    end
+
+    subgraph "L3 Hooks [feature: api]"
+        m10[m10 server]
+        m11[m11 pre_tool]
+        m12[m12 post_tool]
+        m13[m13 notification]
+        m14[m14 middleware]
+    end
+
+    subgraph "L2 Wire [always on]"
+        m07[m07 bus]
+        m08[m08 ipc]
+        m09[m09 codec]
+    end
+
+    subgraph "L1 Core [always on]"
+        m01[m01 types]
+        m02[m02 error]
+        m03[m03 config]
+        m04[m04 timestamp]
+        m05[m05 event]
+        m06[m06 util]
+    end
+
+    %% Layer dependencies (arrows = "depends on")
+    L8 --> L7
+    L8 --> L5
+    L8 --> L4
+    L8 --> L1
+
+    L7 --> L5
+    L7 --> L2
+    L7 --> L1
+
+    L6 --> L5
+    L6 --> L4
+    L6 --> L2
+    L6 --> L1
+
+    L5 --> L1
+
+    L4 --> L2
+    L4 --> L1
+
+    L3 --> L2
+    L3 --> L1
+
+    L2 --> L1

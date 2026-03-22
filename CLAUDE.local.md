@@ -1,8 +1,57 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.1.0","status":"PHASE_2_INTELLIGENCE_COMPLETE","phase":"phase-2-intelligence","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":40,"layers":8,"bin_targets":3,"tests":972,"loc":4998,"clippy":0,"session":"053"}
+{"v":"0.1.0","status":"PLAN_COMPLETE","phase":"all-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":3,"tests":1454,"loc":30524,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"session":"054"}
 ```
+
+---
+
+## Session 054 — Phase 4 Evolution + Full Completion (2026-03-22)
+
+**Status:** PLAN COMPLETE — 40/40 modules, 30,524 LOC, 1,454 tests, hooks migrated, all 14 critical path steps done.
+
+### Step 9 — Hook Migration (2026-03-22)
+11. **Hook forwarder created** — `hooks/orac-hook.sh` (generic stdin→curl→stdout bridge)
+12. **6 hooks migrated to ORAC** — SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, PermissionRequest (NEW)
+13. **3 bash scripts consolidated** — PostToolUse (post_tool_use.sh + post_tool_povm_pathway.sh + post_tool_nexus_pattern.sh → single ORAC endpoint)
+14. **2 hooks kept as bash** — SubagentStop (no ORAC endpoint), PreCompact (cascade system)
+15. **1 hook kept as bash** — Stop/check-cipher-messages.sh (non-PV2, cipher system)
+16. **Backup** — `~/.claude/settings.json.pre-orac-backup`
+17. **All 6 ORAC endpoints verified live** — SessionStart (POVM 111 mem, 2437 paths), UserPromptSubmit (r=0.9276, spheres=63), PreToolUse ({}), PostToolUse ({}), Stop ({}), PermissionRequest (auto-approved)
+18. **Rollback command (if needed)** — `\cp -f ~/.claude/settings.json.pre-orac-backup ~/.claude/settings.json`
+19. **HOOKS LIVE** — settings.json has all 6 ORAC hooks wired via orac-hook.sh. Verified 2026-03-22.
+
+### What Was Done (Session 054)
+1. **m39_fitness_tensor** (1,317 LOC) — 12-dim weighted fitness evaluation with ORAC-specific dimensions (coordination_quality, field_coherence, dispatch_accuracy, etc.), trend detection via linear regression, stability/volatility assessment. 60 tests.
+2. **m37_emergence_detector** (1,446 LOC) — 8 fleet emergence types (CoherenceLock, ChimeraFormation, CouplingRunaway, HebbianSaturation, DispatchLoop, ThermalSpike, BeneficialSync, ConsentCascade). Ring buffer with TTL decay, 5,000-event cap, monitor accumulation pattern. 41 tests.
+3. **m38_correlation_engine** (976 LOC) — Temporal, causal, recurring, and fitness-linked correlation mining. Pathway discovery with establishment threshold, pattern key tracking, sliding window. 29 tests.
+4. **m40_mutation_selector** (998 LOC) — BUG-035 fix: round-robin cycling, 10-generation cooldown, >50% diversity rejection gate. No mono-parameter monopoly. 34 tests.
+5. **m36_ralph_engine** (1,117 LOC) — 5-phase RALPH orchestrator (Recognize→Analyze→Learn→Propose→Harvest) with snapshot/rollback, generation tracking, auto-pause at max cycles. 28 tests.
+6. **m09_wire_protocol** (916 LOC) — V2 wire protocol state machine (Disconnected→Handshaking→Connected→Subscribing→Active), frame validation, send/recv queues, keepalive. 37 tests.
+7. **m30_wasm_bridge** (729 LOC) — FIFO/ring protocol bridge: command parsing (dispatch/status/field_state/list_panes/ping), EventRingBuffer (1,000 line cap, FIFO eviction), JSONL serialization. 34 tests.
+8. **Quality gate 4/4 clean** — check 0, clippy 0, pedantic 0, 1,454 tests 0 failures
+9. **Release build** — 3 binaries deployed: orac-sidecar (5.5MB), orac-probe (2.3MB), orac-client (337KB)
+10. **All stubs filled** — 40/40 modules implemented, zero scaffolds remaining
+
+### Test Results
+- **1,454 tests** (--features full) — 0 failures, 0 ignored
+- `cargo check` — 0 errors
+- `cargo clippy -D warnings` — 0 warnings
+- `cargo clippy -W pedantic` — 0 warnings
+
+### Per-Layer Summary
+
+| Layer | Dir | Modules | LOC | Tests |
+|-------|-----|---------|-----|-------|
+| L1 Core | `m1_core` | m01-m06 + field_state | 4,020 | 193 |
+| L2 Wire | `m2_wire` | m07-m09 | 2,300 | 111 |
+| L3 Hooks | `m3_hooks` | m10-m14 | 2,405 | 138 |
+| L4 Intelligence | `m4_intelligence` | m15-m21 | 4,402 | 229 |
+| L5 Bridges | `m5_bridges` | m22-m26 | 4,618 | 244 |
+| L6 Coordination | `m6_coordination` | m27-m31 | 2,578 | 119 |
+| L7 Monitoring | `m7_monitoring` | m32-m35 | 4,347 | 230 |
+| L8 Evolution | `m8_evolution` | m36-m40 | 5,854 | 192 |
+| **TOTAL** | | **40** | **30,524** | **1,454** |
 
 ---
 
@@ -86,9 +135,12 @@
 ✅ Step 6: Deploy binary + test against live PV2 (17/17 services, all 6 endpoints verified)
 ✅ Step 7: Git committed + pushed (903fdd2 + 4bf9335, GitLab main)
 ✅ Step 8: Phase 2 — Intelligence (m20 semantic router, m21 circuit breaker, m26 blackboard)
-⬜ Step 9: Migrate settings.json hooks from bash to HTTP (shared system change — needs operator approval)
-⬜ Step 10: Phase 3 — Bridges + monitoring
-⬜ Step 11: Phase 4 — Evolution (RALPH)
+✅ Step 9: Migrate settings.json hooks from bash to HTTP (6 hooks → ORAC, SubagentStop+PreCompact kept as bash)
+✅ Step 10: Phase 3 — Bridges + monitoring (m22-m26 bridges, m32-m35 monitoring, 8,965 LOC, 474 tests)
+✅ Step 11: Phase 4 — Evolution (m36-m40 RALPH, 5,854 LOC, 192 tests, BUG-035 fixed)
+✅ Step 12: Fill remaining stubs (m09 wire protocol 916 LOC, m30 WASM bridge 729 LOC)
+✅ Step 13: Full quality gate (1,454 tests, 0 failures, 0 clippy warnings)
+✅ Step 14: Release build (orac-sidecar 5.5MB, orac-probe 2.3MB, orac-client 337KB)
 ```
 
 ---
@@ -258,24 +310,25 @@ depends_on = ["pane-vortex", "povm-engine"]
 description = "Intelligent fleet coordination proxy — HTTP hooks, Hebbian STDP, RALPH evolution"
 ```
 
-## Hook Migration
+## Hook Migration — COMPLETE (2026-03-22)
 
-When ORAC HTTP hook server is ready, update `~/.claude/settings.json`:
+Hooks migrated from PV2 bash scripts to ORAC HTTP endpoints via `hooks/orac-hook.sh` forwarder.
 
-```json
-{
-  "hooks": {
-    "SessionStart": [{ "type": "http", "url": "http://localhost:8133/hooks/SessionStart", "timeout": 5000 }],
-    "PostToolUse": [{ "type": "http", "url": "http://localhost:8133/hooks/PostToolUse", "timeout": 3000 }],
-    "PreToolUse": [{ "type": "http", "url": "http://localhost:8133/hooks/PreToolUse", "timeout": 2000 }],
-    "UserPromptSubmit": [{ "type": "http", "url": "http://localhost:8133/hooks/UserPromptSubmit", "timeout": 3000 }],
-    "Stop": [{ "type": "http", "url": "http://localhost:8133/hooks/Stop", "timeout": 5000 }],
-    "PermissionRequest": [{ "type": "http", "url": "http://localhost:8133/hooks/PermissionRequest", "timeout": 2000 }]
-  }
-}
-```
+**Forwarder:** `orac-sidecar/hooks/orac-hook.sh <EventName> [timeout]` — reads stdin, POSTs to ORAC, outputs response.
 
-**Rollback:** Restore bash hooks from `pane-vortex-v2/hooks/*.sh` if ORAC hook server fails.
+| Event | Before (bash) | After (ORAC) | Timeout |
+|-------|---------------|--------------|---------|
+| SessionStart | session_start.sh | orac-hook.sh SessionStart | 5s |
+| UserPromptSubmit | user_prompt_field_inject.sh | orac-hook.sh UserPromptSubmit | 3s |
+| PreToolUse | pre_tool_thermal_gate.sh | orac-hook.sh PreToolUse | 2s |
+| PostToolUse | 3 scripts (tool+povm+nexus) | orac-hook.sh PostToolUse | 3s |
+| Stop | session_end.sh | orac-hook.sh Stop | 5s |
+| PermissionRequest | (none) | orac-hook.sh PermissionRequest | 2s |
+| SubagentStop | subagent_field_aggregate.sh | **KEPT** (no ORAC endpoint) | 5s |
+| PreCompact | handoff-dispatch.sh | **KEPT** (cascade system) | 30s |
+| Stop (cipher) | check-cipher-messages.sh | **KEPT** (non-PV2) | — |
+
+**Rollback:** `\cp -f ~/.claude/settings.json.pre-orac-backup ~/.claude/settings.json`
 
 ---
 

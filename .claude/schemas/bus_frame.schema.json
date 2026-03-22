@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BusFrame",
+  "description": "NDJSON wire protocol frame for PV IPC bus. ORAC uses these as IPC client.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": {"const": "handshake"},
+        "id": {"type": "string", "maxLength": 128},
+        "version": {"type": "string"}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["type", "patterns"],
+      "properties": {
+        "type": {"const": "subscribe"},
+        "patterns": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["type", "description", "target"],
+      "properties": {
+        "type": {"const": "submit"},
+        "description": {"type": "string", "maxLength": 1000},
+        "target": {"type": "string"},
+        "payload": {"type": "string"}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["type", "event_type", "data"],
+      "properties": {
+        "type": {"const": "event"},
+        "event_type": {"type": "string"},
+        "data": {"type": "object"}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["type", "target", "brief"],
+      "properties": {
+        "type": {"const": "cascade_handoff"},
+        "target": {"type": "string"},
+        "brief": {"type": "string", "maxLength": 5000}
+      }
+    }
+  ]
+}

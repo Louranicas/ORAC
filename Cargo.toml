@@ -48,7 +48,7 @@ libc = { version = "0.2" }
 approx = "0.5"
 
 [features]
-default = ["api", "persistence", "bridges"]
+default = ["api", "persistence", "bridges", "intelligence", "monitoring", "evolution"]
 api = ["axum", "tower-http"]
 persistence = ["rusqlite"]
 bridges = []

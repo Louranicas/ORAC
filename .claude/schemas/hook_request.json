@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Claude Code Hook Request",
+  "description": "Request payload sent by Claude Code to ORAC hook endpoints. Covers all 6 ORAC hook events.",
+  "type": "object",
+  "required": ["session_id", "event", "hook_id"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "description": "Unique identifier for the Claude Code session."
+    },
+    "event": {
+      "type": "string",
+      "enum": ["SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest"],
+      "description": "The hook event type. ORAC handles all 6."
+    },
+    "hook_id": {
+      "type": "string",
+      "description": "Unique identifier for this hook invocation."
+    },
+    "tool_name": {
+      "type": "string",
+      "description": "Name of the tool being invoked (PreToolUse/PostToolUse only)."
+    },
+    "tool_input": {
+      "type": "object",
+      "description": "Input parameters for the tool (PreToolUse/PostToolUse only).",
+      "additionalProperties": true
+    },
+    "tool_output": {
+      "type": "object",
+      "description": "Output from the tool (PostToolUse only).",
+      "additionalProperties": true
+    },
+    "prompt": {
+      "type": "string",
+      "description": "The user prompt text (UserPromptSubmit only)."
+    },
+    "permission": {
+      "type": "object",
+      "description": "Permission details (PermissionRequest only).",
+      "properties": {
+        "tool": {"type": "string", "description": "Tool requesting permission."},
+        "action": {"type": "string", "description": "Specific action being requested."},
+        "target": {"type": "string", "description": "Target of the action (file path, URL, etc.)."}
+      }
+    },
+    "stop_reason": {
+      "type": "string",
+      "description": "Why the session is stopping (Stop only).",
+      "enum": ["completed", "error", "user_cancelled", "context_limit"]
+    }
+  },
+  "additionalProperties": false
+}

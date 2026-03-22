@@ -10,11 +10,10 @@
 //! The thermal adjustment feeds into the consent gate (M28) before being applied
 //! to the coupling field. SYNTHEX synergy is at 0.15-0.5 (ALERT-1 from Session 040).
 //!
-//! ## ADAPT for ORAC
-//! This module needs adaptation for ORAC deployment:
-//! - Port may change from 8090 (configurable via `with_config`)
-//! - Socket address format must remain `host:port` (no `http://` prefix, BUG-033)
-//! - Poll interval may need tuning for sidecar tick rate
+//! ## ORAC Adaptations (applied)
+//! - Port configurable via `with_config` (default 8090)
+//! - Socket address: raw `host:port` (no `http://` prefix, BUG-033)
+//! - Poll interval configurable (default 6 ticks)
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
