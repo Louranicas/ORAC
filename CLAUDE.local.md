@@ -56,33 +56,79 @@
 
 ---
 
+## What Is ORAC
+
+ORAC is an Envoy-like proxy specialized for AI agent traffic — replacing the V1 swarm-sidecar (546 LOC, non-functional for 17+ hours due to V1/V2 wire mismatch). It fills 10 gaps that bash hooks cannot: real-time push notifications, bidirectional event streaming, persistent socket multiplexing, sub-second coordination, cross-pane awareness, high-frequency STDP, persistent fleet state, WASM plugin bridge, closed-loop thermal damping, and HTTP hook server replacing all 8 bash scripts.
+
+**Validated by:** arxiv 2508.12314 (Kuramoto oscillators for AI agent coordination — we're ahead of academia).
+
+---
+
+## Git Repository
+
+**Remote:** `git@gitlab.com:lukeomahoney/orac-sidecar.git`
+**URL:** `https://gitlab.com/lukeomahoney/orac-sidecar`
+**Branch:** `main`
+**Commits:** 2 (`2d40fdc` initial, `6143b5f` pre-scaffold complete)
+
+---
+
 ## Next Step: Scaffold ORAC
 
-When ready to scaffold, create `plan.toml` in this directory then run:
+`plan.toml` is READY. When user gives deploy order, run:
 
 ```bash
 scaffold-gen --from-plan plan.toml /home/louranicas/claude-code-workspace/orac-sidecar
 ```
 
-### plan.toml Design (Draft)
+Then follow the 7-step integration protocol in `ORAC_PLAN.md` to copy candidate-modules into the scaffolded `src/` tree.
 
-The ORAC sidecar uses a custom layer structure (not the PV2 default 8-layer):
+### Architecture (8 Layers, 42 Modules, 3 Binaries)
 
 ```
-L1 Core       — Types, errors, config, constants (hot-swap M01-M06)
-L2 Wire       — IPC client, bus types, wire protocol (hot-swap M29+M30)
-L3 Hooks      — HTTP hook server, 6 hook handlers, permission policy
-L4 Intelligence — Hebbian STDP, semantic router, circuit breaker, blackboard
-L5 Bridges    — SYNTHEX, ME, POVM, RM bridges (adapt M22, M24-M26)
-L6 Coordination — Conductor, cascade, tick, WASM bridge
-L7 Monitoring  — OTel traces, metrics export, field dashboard
-L8 Evolution   — RALPH engine, emergence, correlation, fitness (feature-gated)
+L1 Core        (m01-m06)  — Types, errors, config, constants, traits, validation
+L2 Wire        (m07-m09)  — IPC client, bus types, wire protocol
+L3 Hooks       (m10-m14)  — HTTP hook server, session/tool/prompt hooks, permission policy
+L4 Intelligence (m15-m21) — Coupling, auto-K, topology, Hebbian, buoy, semantic router, circuit breaker
+L5 Bridges     (m22-m26)  — SYNTHEX, ME, POVM, RM bridges, blackboard
+L6 Coordination (m27-m31) — Conductor, cascade, tick, WASM bridge, memory manager
+L7 Monitoring  (m32-m35)  — OTel traces, metrics, field dashboard, token accounting
+L8 Evolution   (m36-m40)  — RALPH engine, emergence, correlation, fitness tensor, mutation selector
 ```
 
-### Bin Targets
-- `orac-sidecar` — main daemon (port 8133)
-- `orac-client` — CLI test client
-- `orac-probe` — health/diagnostics probe
+**Bin targets:** `orac-sidecar` (daemon), `orac-client` (CLI), `orac-probe` (diagnostics)
+**Features:** `api`, `persistence`, `bridges`, `intelligence`, `monitoring`, `evolution`, `full`
+
+### Candidate Modules (pre-refactored, staged)
+
+```
+candidate-modules/
+├── drop-in/ (18 files, 10,516 lines — copy as-is into scaffolded src/)
+│   ├── L1-foundation/  → src/m1_core/
+│   ├── L2-wire/        → src/m2_wire/
+│   ├── L4-coupling/    → src/m4_intelligence/
+│   ├── L4-learning/    → src/m4_intelligence/
+│   └── L6-cascade/     → src/m6_coordination/
+└── adapt/ (6 files, 5,420 lines — need ORAC-specific changes marked with ## ADAPT headers)
+    ├── L5-synthex/     → src/m5_bridges/
+    ├── L5-me/          → src/m5_bridges/
+    ├── L5-povm/        → src/m5_bridges/
+    ├── L5-rm/          → src/m5_bridges/
+    ├── L6-conductor/   → src/m6_coordination/
+    └── L6-tick/        → src/m6_coordination/
+```
+
+### Key Services (must be running for relevant phases)
+
+| Service | Port | Health | Needed For |
+|---------|------|--------|------------|
+| PV2 | 8132 | `/health` | Phase 1+ (IPC bus) |
+| SYNTHEX | 8090 | `/api/health` | Phase 3 (bridge) |
+| ME | 8080 | `/api/health` | Phase 3 (bridge) |
+| POVM | 8125 | `/health` | Phase 3 (bridge) |
+| RM | 8130 | `/health` | Phase 3 (bridge) |
+
+Start all: `~/.local/bin/devenv -c ~/.config/devenv/devenv.toml start`
 
 ---
 

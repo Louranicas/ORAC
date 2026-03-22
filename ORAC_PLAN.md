@@ -412,6 +412,7 @@ Spheres declare consent posture, not just observed receptivity:
 
 ## Cross-References
 
+- **GitLab:** `git@gitlab.com:lukeomahoney/orac-sidecar.git` | `https://gitlab.com/lukeomahoney/orac-sidecar`
 - **Obsidian (main vault):** `Session 050 — ORAC Sidecar Architecture.md` + 6 supporting notes
 - **PV2 source:** `/home/louranicas/claude-code-workspace/pane-vortex-v2/` (31,859 LOC, 1,527 tests)
 - **V1 sidecar:** `/home/louranicas/claude-code-workspace/swarm-sidecar/` (753 LOC, 15 tests)
