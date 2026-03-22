@@ -1,7 +1,7 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.0.0","status":"SCAFFOLD_READY","phase":"pre-scaffold-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":42,"layers":8,"bin_targets":3,"tests":0,"loc":0,"clippy":0,"session":"050"}
+{"v":"0.0.0","status":"SCAFFOLD_READY","phase":"pre-scaffold-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":40,"layers":8,"bin_targets":3,"tests":0,"loc":0,"clippy":0,"session":"050"}
 ```
 
 ---
@@ -19,7 +19,7 @@
 6. **Rust Gold Standard** documented — 10 constraints, 9 pattern categories, 17 anti-patterns from ME V2 L1+L2
 7. **CLAUDE.md + CLAUDE.local.md** — project context files
 8. **candidate-modules/** — 24 files (15,936 lines) cloned from PV2, refactored to gold standard, staged for scaffold integration. 42 violations found and fixed. Scaffold integration protocol documented in ORAC_PLAN.md.
-9. **plan.toml** — 8 layers, 42 modules, 3 bin targets (orac-sidecar, orac-client, orac-probe), 7 features, consent config, quality gate, server/IPC/bridge/evolution config sections
+9. **plan.toml** — 8 layers, 40 modules, 3 bin targets (orac-sidecar, orac-client, orac-probe), 7 features, consent config, quality gate, server/IPC/bridge/evolution config sections
 10. **Git initialized** — commit `2d40fdc` with all planning artifacts + candidate modules
 11. **scripts/test-hook-server.py** — Minimal HTTP hook format test server for Phase 1 de-risking
 12. **Obsidian note** — `[[ORAC — RALPH Multi-Parameter Mutation Fix]]` documenting BUG-035 lesson + diversity-enforced selection design
@@ -31,7 +31,7 @@
 ✅ Step 2: Verify Hebbian wired (coupling range 0.09–0.60, BUG-031 committed)
 ✅ Step 3: Fix ME deadlock (DB pruned, min_confidence 0.5, 57 mutations in 11 RALPH cycles)
 ✅ Step 3b: Git initialized (commit 2d40fdc, 28 files)
-✅ Step 3c: plan.toml created (8 layers, 42 modules, 3 bin targets, 7 features)
+✅ Step 3c: plan.toml created (8 layers, 40 modules, 3 bin targets, 7 features)
 ✅ Step 3d: HTTP hook test server staged (scripts/test-hook-server.py)
 ✅ Step 3e: RALPH mutation fix documented (Obsidian + ORAC_PLAN.md Phase 4 warning)
 ✅ Step 3f: Phase 3 prerequisite documented (devenv start before bridges)
@@ -69,7 +69,7 @@ ORAC is an Envoy-like proxy specialized for AI agent traffic — replacing the V
 **Remote:** `git@gitlab.com:lukeomahoney/orac-sidecar.git`
 **URL:** `https://gitlab.com/lukeomahoney/orac-sidecar`
 **Branch:** `main`
-**Commits:** 2 (`2d40fdc` initial, `6143b5f` pre-scaffold complete)
+**Commits:** 3 (`2d40fdc` initial, `6143b5f` pre-scaffold complete, `de0ef08` context enrichment)
 
 ---
 
@@ -83,7 +83,7 @@ scaffold-gen --from-plan plan.toml /home/louranicas/claude-code-workspace/orac-s
 
 Then follow the 7-step integration protocol in `ORAC_PLAN.md` to copy candidate-modules into the scaffolded `src/` tree.
 
-### Architecture (8 Layers, 42 Modules, 3 Binaries)
+### Architecture (8 Layers, 40 Modules, 3 Binaries)
 
 ```
 L1 Core        (m01-m06)  — Types, errors, config, constants, traits, validation
