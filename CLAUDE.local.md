@@ -83,9 +83,19 @@
 4. **Read `ORAC_PLAN.md`** — full architecture and build phases
 5. **Read `ORAC_MINDMAP.md`** — Obsidian cross-references and Rust gold standard
 
-**After bootstrap, WAIT for Luke to type `start coding` before taking ANY action.**
+**After bootstrap, WAIT for Luke to type `start coding` or `proceed with phase 2` before taking ANY action.**
 
-Bootstrap gives you god-tier understanding. But implementation and code changes require explicit authorization via `start coding`.
+Bootstrap gives you god-tier understanding. But implementation and code changes require explicit authorization via `start coding` or `proceed with phase 2`.
+
+**If Luke types `proceed with phase 2`:**
+1. Verify ORAC is still running: `curl -s http://localhost:8133/health | jq .`
+2. Run quality gate to confirm clean baseline (699 tests)
+3. Read `ORAC_PLAN.md` §Phase 2 Detail
+4. Implement 3 modules: `m20_semantic_router`, `m21_circuit_breaker`, `m26_blackboard`
+5. All 3 are NEW modules — no hot-swap from PV2, written from scratch
+6. Feature gates: `intelligence` (m20, m21), `persistence` (m26)
+7. Dependencies: `tower` crate (circuit breaker), `rusqlite` (blackboard)
+8. Quality gate after each module, commit when all 3 pass
 
 ---
 

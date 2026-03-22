@@ -8,7 +8,7 @@
 
 ## DEPLOYMENT GATE
 
-**Do NOT write code, create files, or make changes until Luke types `start coding`.**
+**Do NOT write code, create files, or make changes until Luke types `start coding` or `proceed with phase 2`.**
 
 Bootstrap with `/primehabitat` → `/deephabitat` → read `CLAUDE.local.md`. Then WAIT.
 
