@@ -70,7 +70,7 @@ impl FieldState {
             (s + sp.phase.sin(), c + sp.phase.cos())
         });
         #[allow(clippy::cast_precision_loss)]
-        let r = (sin_sum * sin_sum + cos_sum * cos_sum).sqrt() / (n as f64);
+        let r = sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / (n as f64);
         let psi = sin_sum.atan2(cos_sum);
 
         let order = OrderParameter {

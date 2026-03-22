@@ -135,9 +135,10 @@ impl Point3D {
     /// Construct from spherical coordinates (physics convention: theta=polar, phi=azimuthal).
     #[must_use]
     pub fn from_spherical(theta: f64, phi: f64) -> Self {
+        let sin_theta = theta.sin();
         Self {
-            x: theta.sin() * phi.cos(),
-            y: theta.sin() * phi.sin(),
+            x: sin_theta * phi.cos(),
+            y: sin_theta * phi.sin(),
             z: theta.cos(),
         }
     }
@@ -200,9 +201,9 @@ impl Point3D {
         let sb = (t * omega).sin() / sin_omega;
 
         Self {
-            x: sa * a.x + sb * b.x,
-            y: sa * a.y + sb * b.y,
-            z: sa * a.z + sb * b.z,
+            x: sa.mul_add(a.x, sb * b.x),
+            y: sa.mul_add(a.y, sb * b.y),
+            z: sa.mul_add(a.z, sb * b.z),
         }
     }
 }
