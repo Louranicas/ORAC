@@ -47,6 +47,9 @@ use crate::m1_core::m03_config::PvConfig;
 use crate::m8_evolution::m36_ralph_engine::RalphEngine;
 #[cfg(feature = "persistence")]
 use crate::m5_bridges::m26_blackboard::Blackboard;
+use crate::m4_intelligence::m15_coupling_network::CouplingNetwork;
+#[cfg(feature = "intelligence")]
+use crate::m4_intelligence::m21_circuit_breaker::{BreakerConfig, BreakerRegistry};
 
 /// Maximum ghost traces retained (FIFO eviction beyond this).
 const MAX_GHOSTS: usize = 20;
@@ -61,6 +64,26 @@ pub fn epoch_ms() -> u64 {
         .map_or(0, |d| {
             u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// Open the local blackboard database.
+///
+/// Uses `~/.local/share/orac/blackboard.db` (or `/tmp` fallback).
+/// Returns `None` if the DB cannot be opened (non-fatal — hooks still work).
+#[cfg(feature = "persistence")]
+fn open_blackboard() -> Option<Mutex<Blackboard>> {
+    let dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let orac_dir = dir.join("orac");
+    let _ = std::fs::create_dir_all(&orac_dir);
+    let path = orac_dir.join("blackboard.db");
+    match Blackboard::open(&path.to_string_lossy()) {
+        Ok(bb) => Some(Mutex::new(bb)),
+        Err(e) => {
+            tracing::warn!("blackboard open failed: {e}");
+            None
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -302,6 +325,11 @@ pub struct OracState {
     /// RALPH evolution engine (feature-gated).
     #[cfg(feature = "evolution")]
     pub ralph: RalphEngine,
+    /// Hebbian coupling network for semantic routing.
+    pub coupling: RwLock<CouplingNetwork>,
+    /// Circuit breaker registry for external service calls.
+    #[cfg(feature = "intelligence")]
+    pub breakers: RwLock<BreakerRegistry>,
 }
 
 impl OracState {
@@ -320,9 +348,12 @@ impl OracState {
             ghosts: RwLock::new(VecDeque::new()),
             consents: RwLock::new(HashMap::new()),
             #[cfg(feature = "persistence")]
-            blackboard: None,
+            blackboard: open_blackboard(),
             #[cfg(feature = "evolution")]
             ralph: RalphEngine::new(),
+            coupling: RwLock::new(CouplingNetwork::new()),
+            #[cfg(feature = "intelligence")]
+            breakers: RwLock::new(init_breaker_registry()),
         }
     }
 
@@ -350,6 +381,9 @@ impl OracState {
             blackboard: None,
             #[cfg(feature = "evolution")]
             ralph: RalphEngine::new(),
+            coupling: RwLock::new(CouplingNetwork::new()),
+            #[cfg(feature = "intelligence")]
+            breakers: RwLock::new(init_breaker_registry()),
         }
     }
 
@@ -382,6 +416,13 @@ impl OracState {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Access the local `SQLite` blackboard (if persistence is enabled and DB opened).
+    #[cfg(feature = "persistence")]
+    #[must_use]
+    pub fn blackboard(&self) -> Option<parking_lot::MutexGuard<'_, Blackboard>> {
+        self.blackboard.as_ref().map(Mutex::lock)
+    }
+
     /// Record a ghost trace for a deregistered sphere.
     ///
     /// Maintains a FIFO ring of the last 20 ghost entries.
@@ -407,6 +448,22 @@ impl OracState {
             .get(sphere_id)
             .cloned()
             .unwrap_or_else(OracConsent::fully_open)
+    }
+
+    /// Check whether a specific bridge operation is consented for a sphere.
+    ///
+    /// Returns `true` if the operation is allowed (default for unknown spheres).
+    /// Field names: `"synthex_write"`, `"povm_read"`, `"povm_write"`, `"hydration"`.
+    #[must_use]
+    pub fn consent_allows(&self, sphere_id: &str, field: &str) -> bool {
+        let consent = self.get_consent(sphere_id);
+        match field {
+            "synthex_write" => consent.synthex_write,
+            "povm_read" => consent.povm_read,
+            "povm_write" => consent.povm_write,
+            "hydration" => consent.hydration,
+            _ => true, // unknown fields default to allowed
+        }
     }
 
     /// Update consent fields for a sphere. Returns list of updated field names.
@@ -442,6 +499,54 @@ impl OracState {
         }
         updated
     }
+
+    /// Check whether a service's circuit breaker allows requests.
+    #[cfg(feature = "intelligence")]
+    #[must_use]
+    pub fn breaker_allows(&self, service: &str) -> bool {
+        self.breakers.read().allows_request(&PaneId::new(service))
+    }
+
+    /// Record a successful call to a service.
+    #[cfg(feature = "intelligence")]
+    pub fn breaker_success(&self, service: &str) {
+        self.breakers.write().record_success(&PaneId::new(service));
+    }
+
+    /// Record a failed call to a service.
+    #[cfg(feature = "intelligence")]
+    pub fn breaker_failure(&self, service: &str) {
+        let tick = self.tick.load(Ordering::Relaxed);
+        self.breakers
+            .write()
+            .record_failure(&PaneId::new(service), tick);
+    }
+
+    /// Advance all breaker state machines by one tick.
+    #[cfg(feature = "intelligence")]
+    pub fn breaker_tick(&self) {
+        let tick = self.tick.load(Ordering::Relaxed);
+        self.breakers.write().tick_all(tick);
+    }
+
+    /// Get breaker state counts `(closed, open, half_open)`.
+    #[cfg(feature = "intelligence")]
+    #[must_use]
+    pub fn breaker_state_counts(&self) -> (usize, usize, usize) {
+        self.breakers.read().state_counts()
+    }
+}
+
+/// Create and populate the default breaker registry with per-service configs.
+#[cfg(feature = "intelligence")]
+fn init_breaker_registry() -> BreakerRegistry {
+    let mut reg = BreakerRegistry::new(BreakerConfig::default());
+    reg.register(PaneId::new("pv2"), BreakerConfig::aggressive());
+    reg.register(PaneId::new("synthex"), BreakerConfig::aggressive());
+    reg.register(PaneId::new("me"), BreakerConfig::tolerant());
+    reg.register(PaneId::new("povm"), BreakerConfig::default());
+    reg.register(PaneId::new("rm"), BreakerConfig::default());
+    reg
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -466,6 +571,34 @@ pub fn fire_and_forget_post(url: String, body: String) {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::debug!("fire-and-forget POST failed: {e}"),
             Err(e) => tracing::debug!("fire-and-forget task panicked: {e}"),
+        }
+    });
+}
+
+/// Fire-and-forget HTTP POST that records breaker outcomes.
+///
+/// Checks the breaker before calling. Records success/failure after.
+/// If the breaker is open, skips the call entirely.
+#[cfg(feature = "intelligence")]
+pub fn breaker_guarded_post(state: &Arc<OracState>, service: &str, url: String, body: String) {
+    if !state.breaker_allows(service) {
+        tracing::debug!("breaker open for {service}, skipping POST to {url}");
+        return;
+    }
+    let service_name = service.to_owned();
+    let state_clone = Arc::clone(state);
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            ureq::post(&url)
+                .timeout(Duration::from_millis(2000))
+                .set("Content-Type", "application/json")
+                .send_string(&body)
+                .map_err(Box::new)
+        })
+        .await;
+        match result {
+            Ok(Ok(_)) => state_clone.breaker_success(&service_name),
+            _ => state_clone.breaker_failure(&service_name),
         }
     });
 }
@@ -1390,6 +1523,52 @@ mod tests {
     fn consents_empty_initially() {
         let state = OracState::new(PvConfig::default());
         assert!(state.consents.read().is_empty());
+    }
+
+    // ── consent_allows ──
+
+    #[test]
+    fn consent_allows_default_all_open() {
+        let state = OracState::new(PvConfig::default());
+        assert!(state.consent_allows("unknown-sphere", "synthex_write"));
+        assert!(state.consent_allows("unknown-sphere", "povm_read"));
+        assert!(!state.consent_allows("unknown-sphere", "povm_write"));
+        assert!(state.consent_allows("unknown-sphere", "hydration"));
+    }
+
+    #[test]
+    fn consent_allows_respects_updates() {
+        let state = OracState::new(PvConfig::default());
+        let req = ConsentUpdateRequest {
+            synthex_write: Some(false),
+            povm_read: None,
+            povm_write: None,
+            hydration: Some(false),
+        };
+        state.update_consent("sphere-x", &req);
+        assert!(!state.consent_allows("sphere-x", "synthex_write"));
+        assert!(state.consent_allows("sphere-x", "povm_read"));
+        assert!(!state.consent_allows("sphere-x", "hydration"));
+    }
+
+    #[test]
+    fn consent_allows_unknown_field_defaults_true() {
+        let state = OracState::new(PvConfig::default());
+        assert!(state.consent_allows("any", "unknown_field"));
+    }
+
+    #[test]
+    fn consent_allows_per_sphere_isolation() {
+        let state = OracState::new(PvConfig::default());
+        let req = ConsentUpdateRequest {
+            synthex_write: None,
+            povm_read: None,
+            povm_write: None,
+            hydration: Some(false),
+        };
+        state.update_consent("restricted", &req);
+        assert!(!state.consent_allows("restricted", "hydration"));
+        assert!(state.consent_allows("other-sphere", "hydration"));
     }
 
     // ── epoch_ms ──

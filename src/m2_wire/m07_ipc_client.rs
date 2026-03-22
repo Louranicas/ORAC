@@ -17,18 +17,22 @@
 //!
 //! ## Design
 //! - Configurable socket path (default: `/run/user/1000/pane-vortex-bus.sock`)
-//! - Automatic reconnection with exponential backoff
-//! - Channel-based receive for non-blocking event consumption
-//! - `Send + Sync` safe via `tokio::sync::mpsc` channels
+//! - Persistent socket halves stored after handshake for ongoing I/O
+//! - All send/receive methods are async (tokio)
+//! - `subscribe` sends `Subscribe` frame and awaits `Subscribed` response
+//! - `send_frame` serializes to NDJSON and writes to the socket
+//! - `recv_frame` reads a line from the socket and parses NDJSON
 
 use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 use crate::m1_core::m01_core_types::PaneId;
 use crate::m1_core::m02_error_handling::{PvError, PvResult};
 use crate::m2_wire::m08_bus_types::BusFrame;
+use crate::m2_wire::m09_wire_protocol::MAX_FRAME_SIZE;
 
 // ──────────────────────────────────────────────────────────────
 // Constants
@@ -43,14 +47,11 @@ const PROTOCOL_VERSION: &str = "2.0";
 /// Handshake timeout (seconds).
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 
-/// Channel buffer size for received frames.
-const _RECV_CHANNEL_SIZE: usize = 256;
+/// Subscribe response timeout (seconds).
+const SUBSCRIBE_TIMEOUT_SECS: u64 = 5;
 
-/// Maximum reconnection attempts before giving up.
-const _MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Initial backoff delay for reconnection (milliseconds).
-const _INITIAL_BACKOFF_MS: u64 = 500;
+/// Receive timeout for individual frame reads (seconds).
+const RECV_TIMEOUT_SECS: u64 = 30;
 
 // ──────────────────────────────────────────────────────────────
 // IPC Client
@@ -70,13 +71,13 @@ pub enum ConnectionState {
 /// Async IPC client for connecting to the PV2 daemon bus.
 ///
 /// Manages a single Unix socket connection with `NDJSON` framing.
-/// Received frames are delivered via an `mpsc` channel for non-blocking
-/// consumption by the sidecar tick loop.
+/// After [`connect`](Self::connect), the socket reader and writer halves
+/// are stored for use by [`subscribe`](Self::subscribe),
+/// [`send_frame`](Self::send_frame), and [`recv_frame`](Self::recv_frame).
 ///
 /// # Thread Safety
-/// The client struct itself holds configuration and state. The actual
-/// connection is managed via `tokio` tasks spawned by [`connect`](Self::connect).
-#[derive(Debug)]
+/// The client struct itself holds configuration and state. All I/O methods
+/// require `&mut self` for exclusive socket access.
 pub struct IpcClient {
     /// Path to the PV2 bus socket.
     socket_path: PathBuf,
@@ -88,6 +89,24 @@ pub struct IpcClient {
     session_id: Option<String>,
     /// Event subscription patterns.
     subscriptions: Vec<String>,
+    /// Writer half of the connected socket (populated after handshake).
+    writer: Option<OwnedWriteHalf>,
+    /// Buffered reader half of the connected socket (populated after handshake).
+    reader: Option<BufReader<OwnedReadHalf>>,
+}
+
+impl std::fmt::Debug for IpcClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IpcClient")
+            .field("socket_path", &self.socket_path)
+            .field("pane_id", &self.pane_id)
+            .field("state", &self.state)
+            .field("session_id", &self.session_id)
+            .field("subscriptions", &self.subscriptions)
+            .field("has_writer", &self.writer.is_some())
+            .field("has_reader", &self.reader.is_some())
+            .finish()
+    }
 }
 
 impl IpcClient {
@@ -103,6 +122,8 @@ impl IpcClient {
             state: ConnectionState::Disconnected,
             session_id: None,
             subscriptions: Vec::new(),
+            writer: None,
+            reader: None,
         }
     }
 
@@ -115,6 +136,8 @@ impl IpcClient {
             state: ConnectionState::Disconnected,
             session_id: None,
             subscriptions: Vec::new(),
+            writer: None,
+            reader: None,
         }
     }
 
@@ -150,9 +173,13 @@ impl IpcClient {
 
     /// Connect to the PV2 bus socket and perform handshake.
     ///
+    /// On success, stores the socket reader and writer halves for use by
+    /// [`subscribe`](Self::subscribe), [`send_frame`](Self::send_frame),
+    /// and [`recv_frame`](Self::recv_frame).
+    ///
     /// # Errors
-    /// - `PvError::BusSocket` if the socket cannot be opened.
-    /// - `PvError::BusProtocol` if the handshake fails or times out.
+    /// - [`PvError::BusSocket`] if the socket cannot be opened.
+    /// - [`PvError::BusProtocol`] if the handshake fails or times out.
     pub async fn connect(&mut self) -> PvResult<()> {
         self.state = ConnectionState::Connecting;
 
@@ -171,43 +198,26 @@ impl IpcClient {
             self.socket_path.display(),
         )))?;
 
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
+        let (read_half, write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut writer = write_half;
 
         // Send handshake
         let handshake = BusFrame::Handshake {
             pane_id: self.pane_id.clone(),
             version: PROTOCOL_VERSION.to_owned(),
         };
-        let line = handshake
-            .to_ndjson()
-            .map_err(|e| PvError::BusProtocol(format!("handshake serialize: {e}")))?;
-        writer
-            .write_all(format!("{line}\n").as_bytes())
-            .await
-            .map_err(|e| PvError::BusSocket(format!("handshake write: {e}")))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| PvError::BusSocket(format!("handshake flush: {e}")))?;
+        write_ndjson_frame(&mut writer, &handshake).await?;
 
         // Read welcome
-        let mut welcome_line = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
-            reader.read_line(&mut welcome_line),
-        )
-        .await
-        .map_err(|_| PvError::BusProtocol("welcome timeout".into()))?
-        .map_err(|e| PvError::BusSocket(format!("welcome read: {e}")))?;
-
-        let welcome = BusFrame::from_ndjson(welcome_line.trim())
-            .map_err(|e| PvError::BusProtocol(format!("welcome parse: {e}")))?;
+        let welcome = read_ndjson_frame(&mut reader, HANDSHAKE_TIMEOUT_SECS).await?;
 
         match welcome {
             BusFrame::Welcome { session_id, .. } => {
                 self.session_id = Some(session_id);
                 self.state = ConnectionState::Connected;
+                self.writer = Some(writer);
+                self.reader = Some(reader);
                 Ok(())
             }
             BusFrame::Error { code, message } => {
@@ -227,65 +237,99 @@ impl IpcClient {
 
     /// Subscribe to event patterns on the bus.
     ///
+    /// Sends a `Subscribe` frame with the given patterns and awaits the
+    /// server's `Subscribed` response confirming the active subscription count.
+    ///
     /// Must be called after [`connect`](Self::connect). Patterns use glob
     /// syntax (e.g. `"field.*"`, `"sphere.registered"`, `"*"`).
     ///
     /// # Errors
-    /// - `PvError::BusSocket` if not connected.
-    pub fn subscribe(&mut self, patterns: &[String]) -> PvResult<usize> {
-        if !self.is_connected() {
-            return Err(PvError::BusSocket("not connected".into()));
+    /// - [`PvError::BusSocket`] if not connected or socket write fails.
+    /// - [`PvError::BusProtocol`] if the server rejects or times out.
+    pub async fn subscribe(&mut self, patterns: &[String]) -> PvResult<usize> {
+        let writer = self.connected_writer()?;
+
+        let frame = BusFrame::Subscribe {
+            patterns: patterns.to_vec(),
+        };
+        write_ndjson_frame(writer, &frame).await?;
+
+        let reader = self.reader.as_mut()
+            .ok_or_else(|| PvError::BusSocket("no reader available".into()))?;
+        let response = read_ndjson_frame(reader, SUBSCRIBE_TIMEOUT_SECS).await?;
+
+        match response {
+            BusFrame::Subscribed { count } => {
+                self.subscriptions.extend(patterns.iter().cloned());
+                Ok(count)
+            }
+            BusFrame::Error { code, message } => {
+                Err(PvError::BusProtocol(format!(
+                    "subscribe rejected: [{code}] {message}"
+                )))
+            }
+            other => {
+                Err(PvError::BusProtocol(format!(
+                    "expected Subscribed, got {}", other.frame_type()
+                )))
+            }
         }
-
-        self.subscriptions.extend(patterns.iter().cloned());
-
-        // TODO: Phase 1 — send Subscribe frame over socket and await Subscribed response
-        // Requires storing the write half of the stream in the client struct
-        Ok(self.subscriptions.len())
     }
 
-    /// Send a raw `BusFrame` to the server.
+    /// Send a raw [`BusFrame`] to the server.
+    ///
+    /// Serializes the frame to `NDJSON` and writes it to the socket.
+    /// The frame size is validated against [`MAX_FRAME_SIZE`] before sending.
     ///
     /// # Errors
-    /// - `PvError::BusSocket` if not connected or write fails.
-    pub fn send_frame(&self, _frame: &BusFrame) -> PvResult<()> {
-        if !self.is_connected() {
-            return Err(PvError::BusSocket("not connected".into()));
-        }
-
-        // TODO: Phase 1 — serialize and write frame to stored socket writer
-        Ok(())
+    /// - [`PvError::BusSocket`] if not connected or write fails.
+    /// - [`PvError::BusProtocol`] if serialization fails or frame exceeds size limit.
+    pub async fn send_frame(&mut self, frame: &BusFrame) -> PvResult<()> {
+        let writer = self.connected_writer()?;
+        write_ndjson_frame(writer, frame).await
     }
 
-    /// Receive the next `BusFrame` from the server.
+    /// Receive the next [`BusFrame`] from the server.
     ///
-    /// This is a placeholder for the async receive path. In the full
-    /// implementation, frames are delivered via an `mpsc` channel fed
-    /// by a background reader task.
+    /// Reads a single `NDJSON` line from the socket and deserializes it.
+    /// Times out after [`RECV_TIMEOUT_SECS`] seconds.
     ///
     /// # Errors
-    /// - `PvError::BusSocket` if not connected.
-    pub fn recv_frame(&self) -> PvResult<BusFrame> {
+    /// - [`PvError::BusSocket`] if not connected, the socket is closed, or read times out.
+    /// - [`PvError::BusProtocol`] if the line cannot be parsed as a valid [`BusFrame`].
+    pub async fn recv_frame(&mut self) -> PvResult<BusFrame> {
         if !self.is_connected() {
             return Err(PvError::BusSocket("not connected".into()));
         }
-
-        // TODO: Phase 1 — receive from mpsc channel populated by reader task
-        Err(PvError::BusSocket("recv not yet implemented".into()))
+        let reader = self.reader.as_mut()
+            .ok_or_else(|| PvError::BusSocket("no reader available".into()))?;
+        read_ndjson_frame(reader, RECV_TIMEOUT_SECS).await
     }
 
     /// Gracefully disconnect from the bus.
     ///
-    /// Sends a `Disconnect` frame and closes the socket.
+    /// Sends a `Disconnect` frame (best-effort) and drops the socket halves.
     ///
     /// # Errors
-    /// - `PvError::BusSocket` if the disconnect message cannot be sent.
-    pub fn disconnect(&mut self) -> PvResult<()> {
+    /// Returns `Ok(())` even if the disconnect frame cannot be sent (the
+    /// socket is closed regardless).
+    pub async fn disconnect(&mut self) -> PvResult<()> {
         if !self.is_connected() {
             return Ok(());
         }
 
-        // TODO: Phase 1 — send Disconnect frame over socket
+        // Best-effort: send Disconnect frame before closing
+        if let Some(writer) = self.writer.as_mut() {
+            let frame = BusFrame::Disconnect {
+                reason: "orac-sidecar shutdown".to_owned(),
+            };
+            // Ignore write errors — we're closing anyway
+            let _ = write_ndjson_frame(writer, &frame).await;
+        }
+
+        // Drop socket halves (closes the connection)
+        self.writer = None;
+        self.reader = None;
         self.state = ConnectionState::Disconnected;
         self.session_id = None;
         self.subscriptions.clear();
@@ -297,6 +341,90 @@ impl IpcClient {
     pub fn subscriptions(&self) -> &[String] {
         &self.subscriptions
     }
+
+    /// Get a mutable reference to the writer, or error if not connected.
+    ///
+    /// # Errors
+    /// Returns [`PvError::BusSocket`] if not connected or writer is absent.
+    fn connected_writer(&mut self) -> PvResult<&mut OwnedWriteHalf> {
+        if !self.is_connected() {
+            return Err(PvError::BusSocket("not connected".into()));
+        }
+        self.writer.as_mut()
+            .ok_or_else(|| PvError::BusSocket("no writer available".into()))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// NDJSON wire helpers
+// ──────────────────────────────────────────────────────────────
+
+/// Serialize a [`BusFrame`] to `NDJSON` and write it to the socket.
+///
+/// # Errors
+/// - [`PvError::BusProtocol`] if serialization fails or frame exceeds [`MAX_FRAME_SIZE`].
+/// - [`PvError::BusSocket`] if the socket write or flush fails.
+async fn write_ndjson_frame(writer: &mut OwnedWriteHalf, frame: &BusFrame) -> PvResult<()> {
+    let line = frame
+        .to_ndjson()
+        .map_err(|e| PvError::BusProtocol(format!("frame serialize: {e}")))?;
+
+    if line.len() > MAX_FRAME_SIZE {
+        return Err(PvError::BusProtocol(format!(
+            "frame too large: {} bytes > {MAX_FRAME_SIZE}",
+            line.len(),
+        )));
+    }
+
+    writer
+        .write_all(format!("{line}\n").as_bytes())
+        .await
+        .map_err(|e| PvError::BusSocket(format!("frame write: {e}")))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| PvError::BusSocket(format!("frame flush: {e}")))?;
+
+    Ok(())
+}
+
+/// Read a single `NDJSON` line from the socket and parse it as a [`BusFrame`].
+///
+/// # Errors
+/// - [`PvError::BusSocket`] if the read times out or the connection is closed.
+/// - [`PvError::BusProtocol`] if the line cannot be parsed.
+async fn read_ndjson_frame(
+    reader: &mut BufReader<OwnedReadHalf>,
+    timeout_secs: u64,
+) -> PvResult<BusFrame> {
+    let mut line = String::new();
+
+    let bytes_read = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        reader.read_line(&mut line),
+    )
+    .await
+    .map_err(|_| PvError::BusSocket(format!("read timeout after {timeout_secs}s")))?
+    .map_err(|e| PvError::BusSocket(format!("socket read: {e}")))?;
+
+    if bytes_read == 0 {
+        return Err(PvError::BusSocket("connection closed by server".into()));
+    }
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err(PvError::BusProtocol("empty frame received".into()));
+    }
+
+    if trimmed.len() > MAX_FRAME_SIZE {
+        return Err(PvError::BusProtocol(format!(
+            "frame too large: {} bytes > {MAX_FRAME_SIZE}",
+            trimmed.len(),
+        )));
+    }
+
+    BusFrame::from_ndjson(trimmed)
+        .map_err(|e| PvError::BusProtocol(format!("frame parse: {e}")))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -321,6 +449,8 @@ mod tests {
         assert_eq!(client.connection_state(), ConnectionState::Disconnected);
         assert!(!client.is_connected());
         assert!(client.session_id().is_none());
+        assert!(client.writer.is_none());
+        assert!(client.reader.is_none());
     }
 
     #[test]
@@ -357,39 +487,316 @@ mod tests {
         );
         let result = client.connect().await;
         assert!(result.is_err());
-        // State should not be Connected after failure
         assert!(!client.is_connected());
+        assert!(client.writer.is_none());
+        assert!(client.reader.is_none());
     }
 
-    #[test]
-    fn subscribe_without_connect_fails() {
+    #[tokio::test]
+    async fn subscribe_without_connect_fails() {
         let mut client = IpcClient::new(pid("test"));
-        let result = client.subscribe(&["field.*".into()]);
+        let result = client.subscribe(&["field.*".into()]).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn send_frame_without_connect_fails() {
-        let client = IpcClient::new(pid("test"));
+    #[tokio::test]
+    async fn send_frame_without_connect_fails() {
+        let mut client = IpcClient::new(pid("test"));
         let frame = BusFrame::Subscribe {
             patterns: vec!["*".into()],
         };
-        let result = client.send_frame(&frame);
+        let result = client.send_frame(&frame).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn recv_frame_without_connect_fails() {
-        let client = IpcClient::new(pid("test"));
-        let result = client.recv_frame();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn disconnect_when_not_connected_ok() {
+    #[tokio::test]
+    async fn recv_frame_without_connect_fails() {
         let mut client = IpcClient::new(pid("test"));
-        let result = client.disconnect();
+        let result = client.recv_frame().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_when_not_connected_ok() {
+        let mut client = IpcClient::new(pid("test"));
+        let result = client.disconnect().await;
         assert!(result.is_ok());
+    }
+
+    // ── Loopback integration: connect, subscribe, send, recv, disconnect ──
+
+    #[tokio::test]
+    async fn loopback_handshake_subscribe_disconnect() {
+        let socket_path = "/tmp/orac-test-m07-loopback.sock";
+        let _ = tokio::fs::remove_file(socket_path).await;
+
+        let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+
+        // Spawn mock server
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut writer = writer;
+
+            // Read Handshake
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let frame: BusFrame = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(frame, BusFrame::Handshake { .. }));
+
+            // Send Welcome
+            let welcome = BusFrame::Welcome {
+                session_id: "test-session-001".into(),
+                version: "2.0".into(),
+            };
+            let resp = serde_json::to_string(&welcome).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            // Read Subscribe
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let frame: BusFrame = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(frame, BusFrame::Subscribe { .. }));
+
+            // Send Subscribed
+            let subscribed = BusFrame::Subscribed { count: 2 };
+            let resp = serde_json::to_string(&subscribed).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            // Read a raw frame (the send_frame test sends Submit)
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let frame: BusFrame = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(frame, BusFrame::Cascade { .. }));
+
+            // Send an Event for recv_frame to pick up
+            let event = BusFrame::Event {
+                event: crate::m2_wire::m08_bus_types::BusEvent::text(
+                    "field.tick",
+                    "test event",
+                    42,
+                ),
+            };
+            let resp = serde_json::to_string(&event).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            // Read Disconnect
+            line.clear();
+            let _ = reader.read_line(&mut line).await;
+        });
+
+        // Client side
+        let mut client = IpcClient::with_socket_path(pid("orac-test"), socket_path);
+
+        // Connect
+        client.connect().await.unwrap();
+        assert!(client.is_connected());
+        assert_eq!(client.session_id(), Some("test-session-001"));
+        assert!(client.writer.is_some());
+        assert!(client.reader.is_some());
+
+        // Subscribe
+        let count = client
+            .subscribe(&["field.*".into(), "task.*".into()])
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(client.subscriptions().len(), 2);
+
+        // Send frame
+        let cascade = BusFrame::Cascade {
+            source: pid("orac-test"),
+            target: pid("alpha"),
+            brief: "test cascade".into(),
+        };
+        client.send_frame(&cascade).await.unwrap();
+
+        // Recv frame
+        let received = client.recv_frame().await.unwrap();
+        assert!(matches!(received, BusFrame::Event { .. }));
+
+        // Disconnect
+        client.disconnect().await.unwrap();
+        assert!(!client.is_connected());
+        assert!(client.writer.is_none());
+        assert!(client.reader.is_none());
+        assert!(client.subscriptions().is_empty());
+
+        let _ = server.await;
+        let _ = tokio::fs::remove_file(socket_path).await;
+    }
+
+    #[tokio::test]
+    async fn connect_rejected_by_server() {
+        let socket_path = "/tmp/orac-test-m07-reject.sock";
+        let _ = tokio::fs::remove_file(socket_path).await;
+
+        let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut writer = writer;
+
+            // Read Handshake
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+
+            // Send Error instead of Welcome
+            let err = BusFrame::Error {
+                code: 403,
+                message: "unauthorized".into(),
+            };
+            let resp = serde_json::to_string(&err).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+        });
+
+        let mut client = IpcClient::with_socket_path(pid("orac-test"), socket_path);
+        let result = client.connect().await;
+        assert!(result.is_err());
+        assert!(!client.is_connected());
+
+        let _ = server.await;
+        let _ = tokio::fs::remove_file(socket_path).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejected_by_server() {
+        let socket_path = "/tmp/orac-test-m07-sub-reject.sock";
+        let _ = tokio::fs::remove_file(socket_path).await;
+
+        let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut writer = writer;
+
+            // Handshake dance
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let welcome = BusFrame::Welcome {
+                session_id: "s".into(),
+                version: "2.0".into(),
+            };
+            let resp = serde_json::to_string(&welcome).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            // Read Subscribe
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+
+            // Reply with Error
+            let err = BusFrame::Error {
+                code: 400,
+                message: "bad pattern".into(),
+            };
+            let resp = serde_json::to_string(&err).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+        });
+
+        let mut client = IpcClient::with_socket_path(pid("orac-test"), socket_path);
+        client.connect().await.unwrap();
+
+        let result = client.subscribe(&["***invalid***".into()]).await;
+        assert!(result.is_err());
+
+        let _ = server.await;
+        let _ = tokio::fs::remove_file(socket_path).await;
+    }
+
+    #[tokio::test]
+    async fn recv_frame_server_closes_connection() {
+        let socket_path = "/tmp/orac-test-m07-eof.sock";
+        let _ = tokio::fs::remove_file(socket_path).await;
+
+        let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut writer = writer;
+
+            // Handshake
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let welcome = BusFrame::Welcome {
+                session_id: "s".into(),
+                version: "2.0".into(),
+            };
+            let resp = serde_json::to_string(&welcome).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            // Close connection (drop writer)
+            drop(writer);
+        });
+
+        let mut client = IpcClient::with_socket_path(pid("orac-test"), socket_path);
+        client.connect().await.unwrap();
+
+        // Give server time to close
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let result = client.recv_frame().await;
+        assert!(result.is_err());
+
+        let _ = server.await;
+        let _ = tokio::fs::remove_file(socket_path).await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_all_state() {
+        let socket_path = "/tmp/orac-test-m07-disc-state.sock";
+        let _ = tokio::fs::remove_file(socket_path).await;
+
+        let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut writer = writer;
+
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let welcome = BusFrame::Welcome {
+                session_id: "disc-test".into(),
+                version: "2.0".into(),
+            };
+            let resp = serde_json::to_string(&welcome).unwrap();
+            writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            // Read whatever comes (Disconnect or EOF)
+            line.clear();
+            let _ = reader.read_line(&mut line).await;
+        });
+
+        let mut client = IpcClient::with_socket_path(pid("orac-test"), socket_path);
+        client.connect().await.unwrap();
+        assert!(client.is_connected());
+        assert!(client.session_id().is_some());
+
+        client.disconnect().await.unwrap();
+        assert_eq!(client.connection_state(), ConnectionState::Disconnected);
+        assert!(client.session_id().is_none());
+        assert!(client.subscriptions().is_empty());
+        assert!(client.writer.is_none());
+        assert!(client.reader.is_none());
+
+        let _ = server.await;
+        let _ = tokio::fs::remove_file(socket_path).await;
     }
 
     // ── Constants ──
@@ -402,5 +809,19 @@ mod tests {
     #[test]
     fn protocol_version_is_v2() {
         assert_eq!(PROTOCOL_VERSION, "2.0");
+    }
+
+    #[test]
+    fn debug_format_works() {
+        let client = IpcClient::new(pid("test"));
+        let debug = format!("{client:?}");
+        assert!(debug.contains("IpcClient"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn connected_writer_fails_when_disconnected() {
+        let mut client = IpcClient::new(pid("test"));
+        assert!(client.connected_writer().is_err());
     }
 }

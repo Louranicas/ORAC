@@ -40,16 +40,39 @@ pub async fn handle_user_prompt_submit(
         return Json(HookResponse::empty());
     }
 
-    // Parallel data collection
-    let pv2_url = format!("{}/health", state.pv2_url);
+    // Advance breaker tick
+    #[cfg(feature = "intelligence")]
+    state.breaker_tick();
+
+    // Parallel data collection (breaker-gated)
+    let pv2_health_url = format!("{}/health", state.pv2_url);
     let thermal_url = format!("{}/v3/thermal", state.synthex_url);
     let tasks_url = format!("{}/bus/tasks", state.pv2_url);
 
-    let (pv_data, thermal_data, tasks_data) = tokio::join!(
-        http_get(&pv2_url, 1000),
-        http_get(&thermal_url, 1000),
-        http_get(&tasks_url, 1000),
-    );
+    #[cfg(feature = "intelligence")]
+    let pv2_open = !state.breaker_allows("pv2");
+    #[cfg(not(feature = "intelligence"))]
+    let pv2_open = false;
+
+    let (pv_data, thermal_data, tasks_data) = if pv2_open {
+        // PV2 breaker open — skip all PV2 calls, fall back to cached/unknown
+        let thermal = http_get(&thermal_url, 1000).await;
+        (None, thermal, None)
+    } else {
+        let (pv, th, tk) = tokio::join!(
+            http_get(&pv2_health_url, 1000),
+            http_get(&thermal_url, 1000),
+            http_get(&tasks_url, 1000),
+        );
+        // Record PV2 breaker outcome
+        #[cfg(feature = "intelligence")]
+        if pv.is_some() {
+            state.breaker_success("pv2");
+        } else {
+            state.breaker_failure("pv2");
+        }
+        (pv, th, tk)
+    };
 
     // Parse field state
     let (r, tick, spheres) = parse_field_state(pv_data.as_deref());

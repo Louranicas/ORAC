@@ -1,8 +1,61 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.1.0","status":"PLAN_COMPLETE","phase":"all-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":3,"tests":1454,"loc":30524,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"session":"054"}
+{"v":"0.2.0","status":"OPERATIONAL","phase":"runtime-wiring","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":3,"tests":1454,"loc":30524,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_gen":0,"ralph_fitness":0.667,"field_poller":true,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_new":3,"fixes_complete":9,"fixes_remaining":10,"session":"055"}
 ```
+
+---
+
+## Session 055 — Runtime Wiring + Fleet Operations (2026-03-22)
+
+**Status:** OPERATIONAL — RALPH tick loop live (gen=0, fitness=0.667), field_state poller active, 3 new endpoints, default features include all 6, 9/19 fixes complete.
+
+### What Was Done (Session 055)
+
+1. **RALPH tick loop wired** — Evolution engine running live. Generation 0, fitness=0.667. 5-phase cycle (Recognize→Analyze→Learn→Propose→Harvest) executing against real field state. BUG-035 mono-parameter fix active (round-robin + diversity gate).
+2. **field_state poller active** — ORAC now polls PV2 :8132/health on tick interval, caching r/K/spheres/tick into `AppState.field`. Feeds conductor decisions and dashboard.
+3. **3 new endpoints deployed:**
+   - `/traces` — OTel trace store query (recent spans, by-trace, by-pane, errors)
+   - `/dashboard` — Kuramoto field dashboard snapshot (r history, clusters, gaps, chimera)
+   - `/tokens` — Token accounting summary (fleet totals, per-pane, budget status)
+4. **Default features expanded** — `default = ["api", "persistence", "bridges", "intelligence", "monitoring", "evolution"]` — all 6 features now build by default. No more `--features full` required.
+5. **Fleet comms practice** — Full 4-leg relay chain (Orchestrator→ALPHA→BETA→GAMMA) verified. All 9 fleet instances (3 tabs × 3 panes) deployed and communicating via shared-context cascade files.
+6. **Fleet-GAMMA audit** — 8 ORAC modules (M27-M35) audited: 6,544 LOC, 38 structs, 152 functions, 290 tests, 6 architectural TODOs (all deferred-by-design), 0 FIXMEs, 0 HACKs.
+7. **Evolution DB deep dive** — evolution_tracking.db: 172 mutations (BUG-035 confirmed: 122/172 are no-ops on same parameter), fitness stagnant at 0.62. hebbian_pulse.db: 38 pathways at avg 0.895 strength, 6 patterns (all grade A).
+8. **POVM x Evolution cross-correlation** — 120 POVM memories, 2,437 pathways (0% co-activated), 3 cross-system pathways found. Systems structurally aware but operationally disconnected.
+9. **FIX-015 plan** — orac-client CLI implementation designed (7 subcommands, ~280 LOC, uses ureq). Plan at `shared-context/tasks/fix-015-orac-client-impl.md`.
+
+### Fix Tracker (9 Complete, 10 Remaining)
+
+**Complete (9):**
+- FIX-001: Hook migration (6 hooks → ORAC HTTP)
+- FIX-002: BUG-035 mono-parameter mutation fix (round-robin + diversity gate)
+- FIX-003: BUG-033 bridge URL prefix fix (raw SocketAddr only)
+- FIX-004: BUG-032 ProposalManager Default fix (custom impl)
+- FIX-005: Default features expanded (all 6 enabled)
+- FIX-006: field_state poller wired
+- FIX-007: RALPH tick loop activated (gen=0, fitness=0.667)
+- FIX-008: /traces endpoint deployed
+- FIX-009: /dashboard + /tokens endpoints deployed
+
+**Remaining (10):**
+- FIX-010: Wire circuit breaker to live pane health checks
+- FIX-011: IPC client connect to PV2 Unix socket (half-stubbed)
+- FIX-012: Semantic router dispatch integration
+- FIX-013: WASM bridge FIFO/ring I/O (in-memory only currently)
+- FIX-014: Blackboard SQLite persistence (in-memory mode only)
+- FIX-015: orac-client real CLI (plan ready, not implemented)
+- FIX-016: Conductor k_delta recommendations forwarded to PV2
+- FIX-017: Hebbian STDP tick integration in m29_tick Phase 4
+- FIX-018: Governance actuator in m29_tick Phase 5
+- FIX-019: DevEnv registration (orac-sidecar as service #17)
+
+### Fleet Dispatch Reports (Session 055)
+
+- `handoff-gamma-monitoring-audit.md` — M27-M35 audit (290 tests, 6 TODOs)
+- `handoff-gamma-evolution-deep.md` — Evolution DB deep dive (BUG-035 confirmed)
+- `handoff-gamma-cross-correlation.md` — POVM x Evolution analysis (0% co-activation)
+- `fix-015-orac-client-impl.md` — CLI implementation plan
 
 ---
 
@@ -188,27 +241,27 @@ ORAC is an Envoy-like proxy specialized for AI agent traffic — replacing the V
 
 ---
 
-## Next Step: Phase 2 — Intelligence Layer
+## Next Steps: Runtime Wiring (10 Fixes Remaining)
 
-Phase 1 (hooks) is deployed and live on :8133. Phase 2 adds the intelligence layer:
+All 40 modules implemented. All 4 phases complete. Focus is now on **runtime wiring** — connecting the implemented modules to live systems.
 
-1. **m20_semantic_router** — Content-aware dispatch using Hebbian weights + domain affinity
-2. **m21_circuit_breaker** — Per-pane health gating with Closed/Open/HalfOpen FSM
-3. **m26_blackboard** — SQLite shared fleet state (pane status, task history, agent cards)
+**Priority order:**
+1. **FIX-015** — orac-client CLI (plan ready, self-contained)
+2. **FIX-010** — Circuit breaker to live pane health
+3. **FIX-011** — IPC client Unix socket connection
+4. **FIX-014** — Blackboard SQLite persistence (disk, not in-memory)
+5. **FIX-019** — DevEnv registration as service #17
 
 ```bash
-# Verify ORAC is still running before Phase 2 work
-curl -s http://localhost:8133/health | jq .
+# Verify ORAC is still running
+curl -s http://localhost:8133/health | python3 -c "import sys,json;d=json.load(sys.stdin);print(f'ORAC {d[\"status\"]} port={d[\"port\"]} sessions={d[\"sessions\"]} ticks={d[\"uptime_ticks\"]}')"
 
-# Quality gate (run after each module)
+# Quality gate
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo check 2>&1 | tail -20 && \
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy -- -D warnings 2>&1 | tail -20 && \
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy -- -D warnings -W clippy::pedantic 2>&1 | tail -20 && \
 CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
 ```
-
-**Phase 2 sources:** m20+m21 are NEW modules. m26 is NEW (SQLite blackboard).
-**Dependencies:** `tower` (circuit breaker, feature-gated `intelligence`), `rusqlite` (blackboard, feature-gated `persistence`)
 
 ### Architecture (8 Layers, 40 Modules, 3 Binaries)
 

@@ -143,6 +143,69 @@ mod api_tests {
     }
 
     // ──────────────────────────────────────────────────────────
+    // Mock PV2 for /field tests
+    // ──────────────────────────────────────────────────────────
+
+    /// Start a mock PV2 server that returns canned health and spheres data.
+    async fn start_mock_pv2() -> (String, tokio::task::JoinHandle<()>) {
+        let health_handler = axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "r": 0.9276,
+                "tick": 4567,
+                "spheres": 12,
+                "k": 1.5,
+                "k_mod": 1.21
+            }))
+        });
+        let spheres_handler = axum::routing::get(|| async {
+            axum::Json(serde_json::json!([
+                {"id": "sphere-1", "phase": 1.23},
+                {"id": "sphere-2", "phase": 2.34}
+            ]))
+        });
+        let router = axum::Router::new()
+            .route("/health", health_handler)
+            .route("/spheres", spheres_handler);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pv2");
+        let addr = listener.local_addr().expect("mock pv2 addr");
+        let base_url = format!("http://{addr}");
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("mock pv2 serve");
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (base_url, handle)
+    }
+
+    /// Start ORAC server with a custom PV2 URL (pointing to mock).
+    async fn start_test_server_with_pv2(pv2_url: &str) -> (String, tokio::task::JoinHandle<()>) {
+        let state = Arc::new(OracState::with_urls(
+            PvConfig::default(),
+            pv2_url.to_owned(),
+            "http://127.0.0.1:19999".into(),
+            "http://127.0.0.1:19998".into(),
+            "http://127.0.0.1:19997".into(),
+        ));
+        state.register_session("sess-001".into(), PaneId::new("alpha-left"));
+
+        let router = build_router(Arc::clone(&state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        let base_url = format!("http://{addr}");
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("server failed");
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (base_url, handle)
+    }
+
+    // ──────────────────────────────────────────────────────────
     // /field
     // ──────────────────────────────────────────────────────────
 
@@ -168,6 +231,78 @@ mod api_tests {
         let (base, handle) = start_test_server().await;
         let body = get_json(&format!("{base}/field")).await;
         assert!(body.is_object());
+        handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn field_returns_r_and_sphere_count_from_pv2() {
+        let (pv2_url, pv2_handle) = start_mock_pv2().await;
+        let (base, handle) = start_test_server_with_pv2(&pv2_url).await;
+
+        let body = get_json(&format!("{base}/field")).await;
+
+        assert_eq!(body["source"], "pv2_proxy");
+
+        let r = body["r"].as_f64().expect("r should be a number");
+        assert!(
+            (r - 0.9276).abs() < 0.001,
+            "r should be ~0.9276, got {r}"
+        );
+
+        let sphere_count = body["sphere_count"]
+            .as_u64()
+            .expect("sphere_count should be a number");
+        assert_eq!(sphere_count, 12);
+
+        handle.abort();
+        pv2_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn field_returns_k_and_pv2_tick() {
+        let (pv2_url, pv2_handle) = start_mock_pv2().await;
+        let (base, handle) = start_test_server_with_pv2(&pv2_url).await;
+
+        let body = get_json(&format!("{base}/field")).await;
+
+        let k = body["k"].as_f64().expect("k should be a number");
+        assert!((k - 1.5).abs() < 0.001, "k should be 1.5, got {k}");
+
+        let pv2_tick = body["pv2_tick"].as_u64().expect("pv2_tick should be a number");
+        assert_eq!(pv2_tick, 4567);
+
+        handle.abort();
+        pv2_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn field_returns_spheres_array_from_pv2() {
+        let (pv2_url, pv2_handle) = start_mock_pv2().await;
+        let (base, handle) = start_test_server_with_pv2(&pv2_url).await;
+
+        let body = get_json(&format!("{base}/field")).await;
+
+        let spheres = body["spheres"].as_array().expect("spheres should be an array");
+        assert_eq!(spheres.len(), 2);
+        assert_eq!(spheres[0]["id"], "sphere-1");
+
+        handle.abort();
+        pv2_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn field_graceful_when_pv2_unreachable() {
+        // PV2 URL points to a port nobody is listening on
+        let (base, handle) = start_test_server_with_pv2("http://127.0.0.1:19999").await;
+
+        let body = get_json(&format!("{base}/field")).await;
+
+        // Must still return a valid JSON with source and tick
+        assert_eq!(body["source"], "pv2_proxy");
+        assert!(body["tick"].is_number());
+        // r and sphere_count should be absent (not proxied)
+        assert!(body.get("r").is_none() || body["r"].is_null());
+
         handle.abort();
     }
 
@@ -260,6 +395,25 @@ mod api_tests {
         let (base, handle) = start_test_server().await;
         let (_, _, body) = get_text(&format!("{base}/metrics")).await;
         assert!(body.contains("orac_sessions_active 2"));
+        handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metrics_all_data_lines_have_orac_prefix() {
+        let (base, handle) = start_test_server().await;
+        let (_, _, body) = get_text(&format!("{base}/metrics")).await;
+
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // Data lines must start with orac_ prefix
+            assert!(
+                trimmed.starts_with("orac_"),
+                "metric data line should start with orac_ prefix: {trimmed}"
+            );
+        }
         handle.abort();
     }
 

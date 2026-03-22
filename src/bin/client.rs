@@ -21,6 +21,8 @@ fn main() -> ExitCode {
         "field" => cmd_field(),
         "blackboard" => cmd_blackboard(),
         "metrics" => cmd_metrics(),
+        "hook-test" => cmd_hook_test(args.get(2).map(String::as_str)),
+        "probe" => cmd_probe(),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -38,10 +40,15 @@ fn print_help() {
     println!("Usage: orac-client <command>");
     println!();
     println!("Commands:");
-    println!("  status      Show sidecar health and session info");
-    println!("  field       Show Kuramoto field state (r, K, spheres)");
-    println!("  blackboard  Show fleet blackboard state");
-    println!("  metrics     Dump Prometheus-format metrics (raw)");
+    println!("  status          Show sidecar health and session info");
+    println!("  field           Show Kuramoto field state (r, K, spheres)");
+    println!("  blackboard      Show fleet blackboard state");
+    println!("  metrics         Dump Prometheus-format metrics (raw)");
+    println!("  hook-test <evt> Send test payload to a hook endpoint");
+    println!("  probe           Run connectivity checks (ORAC, PV2, SYNTHEX, ME, POVM, RM)");
+    println!();
+    println!("Hook events: SessionStart, Stop, PostToolUse, PreToolUse,");
+    println!("             UserPromptSubmit, PermissionRequest");
 }
 
 /// GET /health — pretty-print ORAC status.
@@ -182,6 +189,97 @@ fn cmd_metrics() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// POST /hooks/<event> — send a test payload and show the response.
+fn cmd_hook_test(event: Option<&str>) -> ExitCode {
+    let Some(event) = event else {
+        eprintln!("Usage: orac-client hook-test <event>");
+        eprintln!("Events: SessionStart, Stop, PostToolUse, PreToolUse,");
+        eprintln!("        UserPromptSubmit, PermissionRequest");
+        return ExitCode::FAILURE;
+    };
+
+    let payload = match event {
+        "SessionStart" | "Stop" => serde_json::json!({
+            "session_id": "test-session-001"
+        }),
+        "PostToolUse" => serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/test"},
+            "tool_output": "file contents here"
+        }),
+        "PreToolUse" => serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo test"}
+        }),
+        "UserPromptSubmit" => serde_json::json!({
+            "prompt": "orac-client hook test"
+        }),
+        "PermissionRequest" => serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/etc/passwd"}
+        }),
+        other => {
+            eprintln!("Unknown hook event: '{other}'");
+            eprintln!("Valid: SessionStart, Stop, PostToolUse, PreToolUse,");
+            eprintln!("       UserPromptSubmit, PermissionRequest");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let url = format!("http://{ORAC_ADDR}/hooks/{event}");
+    let body = match post_json(&url, &payload) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Hook request failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("Hook Response ({event})");
+    println!("{}", "-".repeat(20 + event.len()));
+    format_hook_response(&body);
+
+    ExitCode::SUCCESS
+}
+
+/// Run connectivity probe against all ORAC ecosystem services.
+fn cmd_probe() -> ExitCode {
+    println!("ORAC probe — connectivity diagnostics\n");
+
+    let checks: &[(&str, &str, &str)] = &[
+        ("ORAC HTTP", "127.0.0.1:8133", "/health"),
+        ("PV2 daemon", "127.0.0.1:8132", "/health"),
+        ("SYNTHEX", "127.0.0.1:8090", "/api/health"),
+        ("ME", "127.0.0.1:8080", "/api/health"),
+        ("POVM", "127.0.0.1:8125", "/health"),
+        ("RM", "127.0.0.1:8130", "/health"),
+    ];
+
+    let mut failures = 0_u32;
+
+    for (name, addr, path) in checks {
+        let url = format!("http://{addr}{path}");
+        if let Ok(resp) = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(2))
+            .call()
+        {
+            println!("  [{:>3}] {name:<14} {addr}", resp.status());
+        } else {
+            println!("  [---] {name:<14} {addr} (unreachable)");
+            failures = failures.saturating_add(1);
+        }
+    }
+
+    println!();
+    if failures == 0 {
+        println!("All {} endpoints reachable.", checks.len());
+        ExitCode::SUCCESS
+    } else {
+        println!("{failures}/{} endpoints unreachable.", checks.len());
+        ExitCode::FAILURE
+    }
+}
+
 // --- helpers ---
 
 /// Fetch a URL and return the response body as a string.
@@ -201,6 +299,55 @@ fn fetch(url: &str) -> Result<String, String> {
     }
 
     Ok(body)
+}
+
+/// POST JSON to a URL and return the parsed response.
+fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let body_str = serde_json::to_string(body).map_err(|e| format!("serialize: {e}"))?;
+    let resp = ureq::post(url)
+        .set("Content-Type", "application/json")
+        .timeout(TIMEOUT)
+        .send_string(&body_str)
+        .map_err(|e| format!("{e}"))?;
+
+    let status = resp.status();
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("read body: {e}"))?;
+
+    if status != 200 {
+        return Err(format!("HTTP {status}: {text}"));
+    }
+
+    serde_json::from_str(&text).map_err(|e| format!("parse JSON: {e}"))
+}
+
+/// Pretty-print a hook response (may contain `systemMessage` and/or `decision`).
+fn format_hook_response(v: &serde_json::Value) {
+    if let Some(obj) = v.as_object() {
+        if obj.is_empty() {
+            println!("  (empty response — no action taken)");
+            return;
+        }
+        if let Some(msg) = obj.get("systemMessage").and_then(serde_json::Value::as_str) {
+            println!("  systemMessage: {msg}");
+        }
+        if let Some(dec) = obj.get("decision").and_then(serde_json::Value::as_str) {
+            println!("  decision:      {dec}");
+        }
+        if let Some(reason) = obj.get("reason").and_then(serde_json::Value::as_str) {
+            println!("  reason:        {reason}");
+        }
+        // Print any other keys not already shown
+        let shown = ["systemMessage", "decision", "reason"];
+        for (k, val) in obj {
+            if !shown.contains(&k.as_str()) && !val.is_null() {
+                print_field(k, val);
+            }
+        }
+    } else {
+        println!("  {v}");
+    }
 }
 
 /// Pretty-print a single key-value field from JSON.
