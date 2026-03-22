@@ -75,8 +75,8 @@ pub fn mean_coupling_weight(network: &CouplingNetwork, sphere_id: &PaneId) -> f6
     if nbrs.is_empty() {
         return 0.0;
     }
-    #[allow(clippy::cast_precision_loss)]
-    { nbrs.iter().map(|n| n.effective_weight).sum::<f64>() / nbrs.len() as f64 }
+    let count = f64::from(u32::try_from(nbrs.len()).unwrap_or(u32::MAX));
+    nbrs.iter().map(|n| n.effective_weight).sum::<f64>() / count
 }
 
 /// Degree (number of connections) for a sphere.
@@ -127,8 +127,8 @@ pub fn topology_summary(network: &CouplingNetwork) -> TopologySummary {
 
     let weights: Vec<f64> = network.connections.iter().map(|c| c.weight).collect();
     let sum: f64 = weights.iter().sum();
-    #[allow(clippy::cast_precision_loss)]
-    let mean = sum / total as f64;
+    let total_f = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+    let mean = sum / total_f;
     let max = weights.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let min = weights.iter().copied().fold(f64::INFINITY, f64::min);
     let active = weights
@@ -137,10 +137,12 @@ pub fn topology_summary(network: &CouplingNetwork) -> TopologySummary {
         .count();
 
     let n = network.sphere_count();
-    #[allow(clippy::cast_precision_loss)]
-    let possible = if n > 1 { (n * (n - 1)) as f64 } else { 1.0 };
-    #[allow(clippy::cast_precision_loss)]
-    let density = total as f64 / possible;
+    let possible = if n > 1 {
+        f64::from(u32::try_from(n * (n - 1)).unwrap_or(u32::MAX))
+    } else {
+        1.0
+    };
+    let density = total_f / possible;
 
     TopologySummary {
         total_connections: total,
@@ -445,8 +447,7 @@ mod tests {
     fn topology_50_spheres() {
         let mut net = CouplingNetwork::new();
         for i in 0..50 {
-            #[allow(clippy::cast_precision_loss)]
-            let phase = (i as f64 / 50.0) * std::f64::consts::TAU;
+            let phase = (f64::from(i) / 50.0) * std::f64::consts::TAU;
             net.register(pid(&format!("s{i}")), phase, 0.1);
         }
         let summary = topology_summary(&net);

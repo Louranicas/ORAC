@@ -42,10 +42,9 @@ pub struct StdpResult {
 /// - Weight floor enforced at `HEBBIAN_WEIGHT_FLOOR`
 ///
 /// Respects `opt_out_hebbian` on both spheres.
-#[allow(clippy::implicit_hasher)]
-pub fn apply_stdp(
+pub fn apply_stdp<S: std::hash::BuildHasher>(
     network: &mut CouplingNetwork,
-    spheres: &HashMap<PaneId, PaneSphere>,
+    spheres: &HashMap<PaneId, PaneSphere, S>,
 ) -> StdpResult {
     let mut result = StdpResult::default();
 

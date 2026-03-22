@@ -230,8 +230,7 @@ impl CouplingNetwork {
         let new_k = if spread < 1e-6 {
             1.5
         } else {
-            #[allow(clippy::cast_precision_loss)]
-            let n_f = n as f64;
+            let n_f = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
             let kc = (2.0 * spread / PI) * n_f;
             kc.min(n_f)
         };
@@ -301,9 +300,9 @@ impl CouplingNetwork {
             let receptivity = receptivities.get(id).copied().unwrap_or(1.0);
             let k_effective = self.k * self.k_modulation;
 
-            #[allow(clippy::cast_precision_loss)]
+            let n_f = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
             let d_phase = receptivity.mul_add(
-                (k_effective / n as f64) * coupling_sum,
+                (k_effective / n_f) * coupling_sum,
                 freq,
             );
             *phase = d_phase.mul_add(dt, old_phase).rem_euclid(TAU);
@@ -325,8 +324,7 @@ impl CouplingNetwork {
             .map(|&phi| (phi.cos(), phi.sin()))
             .fold((0.0, 0.0), |(ar, ai), (r, i)| (ar + r, ai + i));
 
-        #[allow(clippy::cast_precision_loss)]
-        let n = self.phases.len() as f64;
+        let n = f64::from(u32::try_from(self.phases.len()).unwrap_or(u32::MAX));
         let r = (re / n).hypot(im / n);
         let psi = (im / n).atan2(re / n).rem_euclid(TAU);
 
@@ -344,14 +342,12 @@ impl CouplingNetwork {
             return 0;
         }
 
-        #[allow(clippy::cast_precision_loss)]
-        let spacing = TAU / sphere_ids.len() as f64;
+        let spacing = TAU / f64::from(u32::try_from(sphere_ids.len()).unwrap_or(u32::MAX));
         let mut kicked = 0;
 
         for (i, id) in sphere_ids.iter().enumerate() {
             if let Some(phase) = self.phases.get_mut(id) {
-                #[allow(clippy::cast_precision_loss)]
-                let target = (i as f64) * spacing;
+                let target = f64::from(u32::try_from(i).unwrap_or(0)) * spacing;
                 let delta = phase_diff(target, *phase);
                 *phase = delta.mul_add(strength, *phase).rem_euclid(TAU);
                 kicked += 1;
@@ -394,7 +390,6 @@ impl Default for CouplingNetwork {
 
 /// Hash-based frequency scale in `[0.2, 2.0]` for natural frequency diversity.
 fn frequency_hash_scale(id: &PaneId) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
     let hash: u64 = id
         .as_str()
         .bytes()
@@ -758,8 +753,7 @@ mod tests {
         let mut net = CouplingNetwork::new();
         net.auto_k = false;
         for i in 0..10 {
-            #[allow(clippy::cast_precision_loss)]
-            let phase = (i as f64 / 10.0) * TAU;
+            let phase = (f64::from(i) / 10.0) * TAU;
             net.phases.insert(pid(&format!("s{i}")), phase);
         }
         let op = net.order_parameter();

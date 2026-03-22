@@ -57,8 +57,8 @@ pub fn buoy_health(sphere: &PaneSphere) -> BuoyHealth {
         .map(|b| b.position.angular_distance(b.home))
         .collect();
 
-    #[allow(clippy::cast_precision_loss)]
-    let mean_drift = drifts.iter().sum::<f64>() / buoy_count as f64;
+    let count = f64::from(u32::try_from(buoy_count).unwrap_or(u32::MAX));
+    let mean_drift = drifts.iter().sum::<f64>() / count;
     let max_drift = drifts.iter().copied().fold(0.0_f64, f64::max);
     let total_activations: u64 = sphere.buoys.iter().map(|b| b.activation_count).sum();
 
@@ -93,8 +93,7 @@ pub struct FleetBuoyStats {
 
 /// Compute fleet-wide buoy statistics.
 #[must_use]
-#[allow(clippy::implicit_hasher)]
-pub fn fleet_buoy_stats(spheres: &HashMap<PaneId, PaneSphere>) -> FleetBuoyStats {
+pub fn fleet_buoy_stats<S: std::hash::BuildHasher>(spheres: &HashMap<PaneId, PaneSphere, S>) -> FleetBuoyStats {
     if spheres.is_empty() {
         return FleetBuoyStats::default();
     }
@@ -118,11 +117,10 @@ pub fn fleet_buoy_stats(spheres: &HashMap<PaneId, PaneSphere>) -> FleetBuoyStats
         }
     }
 
-    #[allow(clippy::cast_precision_loss)]
     let mean_drift = if spheres.is_empty() {
         0.0
     } else {
-        total_drift / spheres.len() as f64
+        total_drift / f64::from(u32::try_from(spheres.len()).unwrap_or(u32::MAX))
     };
 
     // Count cross-sphere overlaps
@@ -168,8 +166,7 @@ pub fn buoy_centroid(sphere: &PaneSphere) -> Point3D {
         return Point3D::north();
     }
 
-    #[allow(clippy::cast_precision_loss)]
-    let n = sphere.buoys.len() as f64;
+    let n = f64::from(u32::try_from(sphere.buoys.len()).unwrap_or(u32::MAX));
     let x: f64 = sphere.buoys.iter().map(|b| b.position.x).sum::<f64>() / n;
     let y: f64 = sphere.buoys.iter().map(|b| b.position.y).sum::<f64>() / n;
     let z: f64 = sphere.buoys.iter().map(|b| b.position.z).sum::<f64>() / n;

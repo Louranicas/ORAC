@@ -282,10 +282,9 @@ const PREFERRED_BONUS: f64 = 0.15;
 ///
 /// Returns `None` if no eligible candidates exist.
 #[must_use]
-#[allow(clippy::implicit_hasher)]
-pub fn route(
+pub fn route<S: std::hash::BuildHasher>(
     request: &RouteRequest,
-    spheres: &HashMap<PaneId, PaneSphere>,
+    spheres: &HashMap<PaneId, PaneSphere, S>,
     network: &CouplingNetwork,
 ) -> Option<RouteResult> {
     let target_phase = request.domain.phase();
@@ -402,8 +401,8 @@ mod tests {
     fn test_network(panes: &[&str]) -> CouplingNetwork {
         let mut net = CouplingNetwork::new();
         for (i, p) in panes.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
-            net.register(pid(p), i as f64 * 0.5, 0.1);
+            let phase = f64::from(u32::try_from(i).unwrap_or(0)) * 0.5;
+            net.register(pid(p), phase, 0.1);
         }
         net
     }

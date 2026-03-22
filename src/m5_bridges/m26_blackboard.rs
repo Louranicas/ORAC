@@ -743,8 +743,7 @@ mod tests {
             let b = bb();
             for i in 0..10 {
                 let mut t = sample_task(&format!("t{i}"), "alpha");
-                #[allow(clippy::cast_precision_loss)]
-                { t.finished_at = i as f64; }
+                t.finished_at = f64::from(i);
                 b.insert_task(&t).unwrap();
             }
             let tasks = b.recent_tasks(&pid("alpha"), 3).unwrap();
