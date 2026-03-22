@@ -1,0 +1,28 @@
+# ORAC Sidecar — Development overrides
+# Inherits from default.toml, overrides for local dev workflow
+
+[logging]
+level = "debug"
+format = "pretty"
+
+[server]
+port = 8133
+bind = "127.0.0.1"
+
+[polling]
+tick_interval_ms = 500
+bridge_poll_ms = 2000
+heartbeat_timeout_s = 30
+
+[evolution]
+enabled = false
+ralph_max_iterations = 0
+
+[blackboard]
+path = "/tmp/orac-dev-blackboard.db"
+snapshot_interval_ticks = 10
+
+[field]
+sync_threshold = 0.5
+tunnel_threshold = 0.8
+k_initial = 2.0

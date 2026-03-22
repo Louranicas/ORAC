@@ -1,10 +1,16 @@
 # ORAC Sidecar — Intelligent Fleet Coordination Proxy
 
 > **Envoy-like proxy specialized for AI agent traffic**
-> **STATUS: PRE-SCAFFOLD** — Plan + mindmap complete, scaffold next
+> **STATUS: SCAFFOLD COMPLETE** — 8 layers, 40 modules, 14,487 LOC, awaiting Phase 1 implementation
 > **ULTRAPLATE Service ID:** `orac-sidecar` | **Port:** 8133 | **Batch:** 5 (needs PV2 + POVM)
-> **Plan:** `ORAC_PLAN.md` | **Mindmap:** `ORAC_MINDMAP.md`
-> **Obsidian:** `[[Session 050 — ORAC Sidecar Architecture]]`
+> **Plan:** `ORAC_PLAN.md` | **Mindmap:** `ORAC_MINDMAP.md` | **Master Index:** `MASTER_INDEX.md`
+> **Obsidian:** `[[Session 050 — ORAC Sidecar Architecture]]` | `[[Session 051 — ORAC Sidecar .claude Scaffolding]]`
+
+## DEPLOYMENT GATE
+
+**Do NOT write code, create files, or make changes until Luke types `start coding`.**
+
+Bootstrap with `/primehabitat` → `/deephabitat` → read `CLAUDE.local.md`. Then WAIT.
 
 ## Architecture (4 Build Phases, ~24,500 LOC)
 
@@ -80,10 +86,10 @@ CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
 | Glob imports | Explicit `use crate::module::{Type1, Type2}` |
 
 ### Module Organisation
-- **Layer directories:** `m1_core/`, `m2_hooks/`, `m3_intelligence/`, etc.
-- **Module files:** `m01_types.rs`, `m02_errors.rs` (2-digit prefix)
+- **Layer directories:** `m1_core/`, `m2_wire/`, `m3_hooks/`, `m4_intelligence/`, etc.
+- **Module files:** `m01_core_types.rs`, `m02_error_handling.rs` (2-digit prefix)
 - **mod.rs:** Layer coordinator with re-exports and `//!` documentation
-- **lib.rs:** `pub mod m1_core; pub mod m2_hooks;` — layer declarations only
+- **lib.rs:** `pub mod m1_core; pub mod m2_wire;` — layer declarations only
 - **Feature gates:** `#[cfg(feature = "evolution")]` for optional layers
 
 ### Modular Architecture

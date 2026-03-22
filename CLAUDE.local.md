@@ -1,7 +1,7 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.0.0","status":"SCAFFOLD_READY","phase":"pre-scaffold-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":40,"layers":8,"bin_targets":3,"tests":0,"loc":0,"clippy":0,"session":"050"}
+{"v":"0.1.0","status":"PHASE_1_HOOKS_COMPLETE","phase":"phase-1-hooks","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":40,"layers":8,"bin_targets":3,"tests":699,"loc":2405,"clippy":0,"session":"052"}
 ```
 
 ---
@@ -35,9 +35,10 @@
 ✅ Step 3d: HTTP hook test server staged (scripts/test-hook-server.py)
 ✅ Step 3e: RALPH mutation fix documented (Obsidian + ORAC_PLAN.md Phase 4 warning)
 ✅ Step 3f: Phase 3 prerequisite documented (devenv start before bridges)
-⬜ Step 4: Scaffold ORAC (scaffold-gen --from-plan plan.toml) ← NEXT (awaiting deploy order)
-⬜ Step 5: Implement Phase 1 (V2 wire + HTTP hooks, ~8K LOC)
-⬜ Step 6: Integrate consent (active declaration, per-sphere policy)
+✅ Step 4: Scaffold ORAC (scaffold-gen ran, 53 files, 8 layers)
+✅ Step 5: Phase 1 HTTP hooks (5 modules, 2,405 LOC, 699 tests, quality gate 4/4 clean)
+⬜ Step 6: Deploy binary + test against live PV2 ← NEXT
+⬜ Step 7: Integrate consent (active declaration, per-sphere policy)
 ```
 
 ---
@@ -52,7 +53,9 @@
 4. **Read `ORAC_PLAN.md`** — full architecture and build phases
 5. **Read `ORAC_MINDMAP.md`** — Obsidian cross-references and Rust gold standard
 
-**After bootstrap, check current phase status and continue from where left off.**
+**After bootstrap, WAIT for Luke to type `start coding` before taking ANY action.**
+
+Bootstrap gives you god-tier understanding. But implementation and code changes require explicit authorization via `start coding`.
 
 ---
 

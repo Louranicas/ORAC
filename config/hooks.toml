@@ -1,0 +1,26 @@
+# ORAC Sidecar — Hook configuration
+# Per-event settings for Claude Code hook processing
+
+[timeouts]
+pre_tool_use_ms = 2000
+post_tool_use_ms = 1000
+pre_compact_ms = 5000
+notification_ms = 500
+
+[auto_approve]
+# Tool patterns that bypass full evaluation (glob syntax)
+patterns = [
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash:ls *",
+    "Bash:git status*",
+    "Bash:git diff*",
+    "Bash:git log*",
+]
+
+[thermal]
+# Thermal thresholds for hook throttling
+warn_temp = 0.7
+critical_temp = 0.9
+cooldown_ticks = 10

@@ -1,0 +1,25 @@
+# bacon configuration for ORAC sidecar
+# https://dystroy.org/bacon/
+
+[jobs.check]
+command = ["cargo", "check", "--color", "always"]
+need_stdout = false
+env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--color", "always", "--", "-D", "warnings", "-W", "clippy::pedantic"]
+need_stdout = false
+env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+
+[jobs.test]
+command = ["cargo", "test", "--lib", "--color", "always"]
+need_stdout = true
+env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+
+[jobs.doc]
+command = ["cargo", "doc", "--no-deps", "--color", "always"]
+need_stdout = false
+env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+
+[default_job]
+name = "check"

@@ -1,0 +1,30 @@
+# ORAC Sidecar — Production configuration
+# Inherits from default.toml, tuned for stable fleet operation
+
+[logging]
+level = "info"
+format = "json"
+
+[server]
+port = 8133
+bind = "127.0.0.1"
+
+[polling]
+tick_interval_ms = 1000
+bridge_poll_ms = 5000
+heartbeat_timeout_s = 60
+
+[evolution]
+enabled = true
+ralph_max_iterations = 30
+rollback_on_regression = true
+
+[blackboard]
+path = "${XDG_DATA_HOME}/orac-sidecar/blackboard.db"
+snapshot_interval_ticks = 60
+
+[field]
+sync_threshold = 0.5
+tunnel_threshold = 0.8
+k_initial = 2.0
+auto_scale_k = true

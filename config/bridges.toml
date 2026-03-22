@@ -1,0 +1,30 @@
+# ORAC Sidecar — Bridge configuration
+# Per-bridge settings for external service connectivity
+
+[bridges.reasoning_memory]
+url = "http://127.0.0.1:8130"
+poll_interval_ms = 5000
+retry_count = 3
+timeout_ms = 3000
+consent_required = false
+
+[bridges.pane_vortex]
+url = "http://127.0.0.1:8132"
+poll_interval_ms = 2000
+retry_count = 3
+timeout_ms = 3000
+consent_required = false
+
+[bridges.vortex_memory]
+url = "http://127.0.0.1:8120"
+poll_interval_ms = 10000
+retry_count = 2
+timeout_ms = 5000
+consent_required = true
+
+[bridges.synthex]
+url = "http://127.0.0.1:8090"
+poll_interval_ms = 10000
+retry_count = 2
+timeout_ms = 5000
+consent_required = true

@@ -1,0 +1,23 @@
+# Default Configuration
+# Generated from plan.toml
+
+[server]
+bind_addr = "127.0.0.1"
+port = 8133
+
+[ipc]
+pv2_socket = "/run/user/1000/pane-vortex-bus.sock"
+pv2_http = "http://127.0.0.1:8132"
+
+[bridges]
+synthex_addr = "127.0.0.1:8090"
+me_addr = "127.0.0.1:8080"
+povm_addr = "127.0.0.1:8125"
+rm_addr = "127.0.0.1:8130"
+
+[evolution]
+enabled = false
+emergence_cap = 5000
+mutation_cooldown_generations = 10
+diversity_window = 20
+diversity_threshold = 0.5
