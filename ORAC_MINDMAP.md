@@ -369,7 +369,14 @@ ORAC SIDECAR (port 8133)
 │           Links: [M] [[CLAUDE.md — Full Reference Archive (2026-03-14)]]
 │
 └── 18. SESSION HISTORY (Critical Path)
-    ├── Session 050 (ORAC Design — TODAY)
+    ├── Session 052 (Phase 1 Hooks Deployed — LATEST)
+    │   ├── [M] [[Session 052 — Phase 1 Hooks Deployed]]  ← NEW (create)
+    │   ├── 5 hook modules: m10-m14, 2,405 LOC, 699 tests
+    │   ├── Binary deployed: ~/.local/bin/orac-sidecar (4.7MB)
+    │   ├── Live tested: 17/17 services, all 6 endpoints verified
+    │   ├── Git: 903fdd2 + 4bf9335, pushed to GitLab
+    │   └── RM: r69bf788f008a deployment record
+    ├── Session 050 (ORAC Design)
     │   ├── [M] [[Session 050 — ORAC Sidecar Architecture]]
     │   ├── [M] [[Session 050 — Sidecar Deep Dive]]
     │   ├── [M] [[Session 050 — Hook Pipeline vs Sidecar Gap]]
@@ -443,13 +450,13 @@ These notes don't exist yet but would strengthen the ORAC sidecar knowledge grap
 |--------|-------|
 | **Tree branches (L1)** | 18 |
 | **Tree branches (L2)** | 68 |
-| **Leaf nodes (bidirectional links)** | 148 |
-| **Unique Obsidian notes linked** | 127 |
-| **Main vault notes** | 107 |
+| **Leaf nodes (bidirectional links)** | 153 |
+| **Unique Obsidian notes linked** | 128 |
+| **Main vault notes** | 108 |
 | **PV2 vault notes** | 8 |
 | **Shared-context vault notes** | 12 |
-| **Recommended new notes** | 16 |
-| **Priority 1 (before build)** | 4 |
+| **Recommended new notes** | 15 |
+| **Priority 1 (before build)** | 3 (1 created: Session 052 note) |
 | **Priority 2 (during Phase 1-2)** | 5 |
 | **Priority 3 (during Phase 3-4)** | 6 |
 | **Priority 4 (post-deploy)** | 3 |

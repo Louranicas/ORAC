@@ -63,8 +63,12 @@
 ✅ Step 3f: Phase 3 prerequisite documented (devenv start before bridges)
 ✅ Step 4: Scaffold ORAC (scaffold-gen ran, 53 files, 8 layers)
 ✅ Step 5: Phase 1 HTTP hooks (5 modules, 2,405 LOC, 699 tests, quality gate 4/4 clean)
-⬜ Step 6: Deploy binary + test against live PV2 ← NEXT
-⬜ Step 7: Integrate consent (active declaration, per-sphere policy)
+✅ Step 6: Deploy binary + test against live PV2 (17/17 services, all 6 endpoints verified)
+✅ Step 7: Git committed + pushed (903fdd2 + 4bf9335, GitLab main)
+⬜ Step 8: Phase 2 — Intelligence (m20 semantic router, m21 circuit breaker, m26 blackboard) ← NEXT
+⬜ Step 9: Migrate settings.json hooks from bash to HTTP (shared system change — needs operator approval)
+⬜ Step 10: Phase 3 — Bridges + monitoring
+⬜ Step 11: Phase 4 — Evolution (RALPH)
 ```
 
 ---
@@ -98,19 +102,31 @@ ORAC is an Envoy-like proxy specialized for AI agent traffic — replacing the V
 **Remote:** `git@gitlab.com:lukeomahoney/orac-sidecar.git`
 **URL:** `https://gitlab.com/lukeomahoney/orac-sidecar`
 **Branch:** `main`
-**Commits:** 3 (`2d40fdc` initial, `6143b5f` pre-scaffold complete, `de0ef08` context enrichment)
+**Commits:** 6 (latest: `4bf9335` Phase 1 hooks + Session 052 record)
 
 ---
 
-## Next Step: Scaffold ORAC
+## Next Step: Phase 2 — Intelligence Layer
 
-`plan.toml` is READY. When user gives deploy order, run:
+Phase 1 (hooks) is deployed and live on :8133. Phase 2 adds the intelligence layer:
+
+1. **m20_semantic_router** — Content-aware dispatch using Hebbian weights + domain affinity
+2. **m21_circuit_breaker** — Per-pane health gating with Closed/Open/HalfOpen FSM
+3. **m26_blackboard** — SQLite shared fleet state (pane status, task history, agent cards)
 
 ```bash
-scaffold-gen --from-plan plan.toml /home/louranicas/claude-code-workspace/orac-sidecar
+# Verify ORAC is still running before Phase 2 work
+curl -s http://localhost:8133/health | jq .
+
+# Quality gate (run after each module)
+CARGO_TARGET_DIR=/tmp/cargo-orac cargo check 2>&1 | tail -20 && \
+CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy -- -D warnings 2>&1 | tail -20 && \
+CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy -- -D warnings -W clippy::pedantic 2>&1 | tail -20 && \
+CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
 ```
 
-Then follow the 7-step integration protocol in `ORAC_PLAN.md` to copy candidate-modules into the scaffolded `src/` tree.
+**Phase 2 sources:** m20+m21 are NEW modules. m26 is NEW (SQLite blackboard).
+**Dependencies:** `tower` (circuit breaker, feature-gated `intelligence`), `rusqlite` (blackboard, feature-gated `persistence`)
 
 ### Architecture (8 Layers, 40 Modules, 3 Binaries)
 

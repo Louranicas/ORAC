@@ -1,0 +1,111 @@
+{
+  "project": "orac-sidecar",
+  "version": "0.1.0",
+  "status": "phase_1_complete",
+  "session": "052",
+  "plan": "ORAC_PLAN.md",
+  "mindmap": "ORAC_MINDMAP.md",
+  "port": 8133,
+  "service_id": "orac-sidecar",
+  "devenv_batch": 5,
+  "role": "Envoy-like proxy specialized for AI agent traffic",
+  "replaces": "swarm-sidecar (V1, 546 LOC, non-functional)",
+  "binary": "~/.local/bin/orac-sidecar",
+  "binary_size": "4.7MB",
+  "tests": 699,
+  "total_loc": 19454,
+  "hooks_loc": 2405,
+  "git_commit": "4bf9335",
+  "layers": {
+    "L1_core": {
+      "modules": ["m01_core_types", "m02_error_handling", "m03_config", "m04_constants", "m05_traits", "m06_validation", "field_state"],
+      "status": "implemented",
+      "loc": 4018,
+      "dependencies": [],
+      "source": "PV2 m1_foundation (M01-M06) + ORAC field_state"
+    },
+    "L2_wire": {
+      "modules": ["m07_ipc_client", "m08_bus_types", "m09_wire_protocol"],
+      "status": "partial",
+      "loc": 1400,
+      "dependencies": ["L1"],
+      "note": "m07+m08 implemented, m09 stub (wire protocol helpers)"
+    },
+    "L3_hooks": {
+      "modules": ["m10_hook_server", "m11_session_hooks", "m12_tool_hooks", "m13_prompt_hooks", "m14_permission_policy"],
+      "status": "implemented",
+      "loc": 2405,
+      "dependencies": ["L1", "L2"],
+      "feature_gates": ["api"],
+      "phase": 1,
+      "note": "COMPLETE — all 6 hook endpoints live on :8133"
+    },
+    "L4_intelligence": {
+      "modules": ["m15_coupling_network", "m16_auto_k", "m17_topology", "m18_hebbian_stdp", "m19_buoy_network", "m20_semantic_router", "m21_circuit_breaker"],
+      "status": "partial",
+      "loc": 2739,
+      "dependencies": ["L1"],
+      "note": "m15-m19 integrated from PV2, m20+m21 stubs — PHASE 2 TARGET",
+      "feature_gates": ["intelligence"]
+    },
+    "L5_bridges": {
+      "modules": ["m22_synthex_bridge", "m23_me_bridge", "m24_povm_bridge", "m25_rm_bridge", "m26_blackboard"],
+      "status": "partial",
+      "loc": 3704,
+      "dependencies": ["L1"],
+      "note": "m22-m25 adapted from PV2, m26 blackboard stub",
+      "feature_gates": ["bridges"]
+    },
+    "L6_coordination": {
+      "modules": ["m27_conductor", "m28_cascade", "m29_tick", "m30_wasm_bridge", "m31_memory_manager"],
+      "status": "partial",
+      "loc": 1849,
+      "dependencies": ["L1", "L4", "L5"],
+      "note": "m27-m29+m31 integrated from PV2, m30 wasm bridge stub"
+    },
+    "L7_monitoring": {
+      "modules": ["m32_otel_traces", "m33_metrics_export", "m34_field_dashboard", "m35_token_accounting"],
+      "status": "stub",
+      "loc": 0,
+      "dependencies": ["L1", "L2", "L5"],
+      "feature_gates": ["monitoring"],
+      "phase": 3
+    },
+    "L8_evolution": {
+      "modules": ["m36_ralph_engine", "m37_emergence_detector", "m38_correlation_engine", "m39_fitness_tensor", "m40_mutation_selector"],
+      "status": "stub",
+      "loc": 0,
+      "dependencies": ["L1", "L4", "L5", "L7"],
+      "feature_gates": ["evolution"],
+      "phase": 4,
+      "note": "CRITICAL: Multi-parameter mutation — NOT mono-parameter (BUG-035)"
+    }
+  },
+  "implementation_state": {
+    "real_modules": ["m01", "m02", "m03", "m04", "m05", "m06", "field_state", "m07", "m08", "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19", "m22", "m23", "m24", "m25", "m27", "m28", "m29", "m31"],
+    "stub_modules": ["m09", "m20", "m21", "m26", "m30", "m32", "m33", "m34", "m35", "m36", "m37", "m38", "m39", "m40"],
+    "next_phase": 2,
+    "phase_2_targets": ["m20_semantic_router", "m21_circuit_breaker", "m26_blackboard"],
+    "phase_2_description": "Intelligence layer — content-aware dispatch, per-pane health gating, shared fleet state"
+  },
+  "bridges": {
+    "pv2": {"port": 8132, "health": "/health", "protocol": "ipc_unix_socket", "socket": "/run/user/1000/pane-vortex-bus.sock"},
+    "synthex": {"port": 8090, "health": "/api/health", "module": "m22", "format": "HTTP"},
+    "me": {"port": 8080, "health": "/api/health", "module": "m23", "format": "HTTP"},
+    "povm": {"port": 8125, "health": "/health", "module": "m24", "format": "HTTP", "note": "Write-only (BUG-034) — must call /hydrate to read"},
+    "rm": {"port": 8130, "health": "/health", "module": "m25", "format": "TSV"}
+  },
+  "hooks": {
+    "SessionStart": {"endpoint": "/hooks/SessionStart", "status": "implemented", "loc": 398},
+    "PostToolUse": {"endpoint": "/hooks/PostToolUse", "status": "implemented", "loc": 559},
+    "PreToolUse": {"endpoint": "/hooks/PreToolUse", "status": "implemented", "loc": 559},
+    "UserPromptSubmit": {"endpoint": "/hooks/UserPromptSubmit", "status": "implemented", "loc": 351},
+    "Stop": {"endpoint": "/hooks/Stop", "status": "implemented", "loc": 398},
+    "PermissionRequest": {"endpoint": "/hooks/PermissionRequest", "status": "implemented", "loc": 362}
+  },
+  "bin_targets": {
+    "orac-sidecar": "Main daemon — deployed at ~/.local/bin/",
+    "orac-client": "CLI client — deployed",
+    "orac-probe": "Diagnostics tool — deployed"
+  }
+}
