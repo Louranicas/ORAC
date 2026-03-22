@@ -1,0 +1,527 @@
+# ═══════════════════════════════════════════════════════════════
+# ORAC Sidecar — Scaffold Plan
+# ═══════════════════════════════════════════════════════════════
+#
+# Intelligent fleet coordination proxy for The Habitat.
+# Envoy-like proxy specialized for AI agent traffic.
+# Port 8133 | DevEnv Batch 5 | Depends on PV2 + POVM
+#
+# Usage: scaffold-gen --from-plan plan.toml /home/louranicas/claude-code-workspace/orac-sidecar
+#
+# After scaffold, integrate candidate-modules/ per ORAC_PLAN.md integration protocol.
+
+[metadata]
+name = "orac-sidecar"
+description = "ORAC — Intelligent fleet coordination proxy with HTTP hooks, Hebbian STDP, and RALPH evolution"
+version = "0.1.0"
+edition = "2021"
+rust_version = "1.75"
+authors = ["Louranicas <louranicas@github.com>"]
+license = "MIT"
+port = 8133
+service_id = "orac-sidecar"
+devenv_batch = 5
+
+# ═══════════════════════════════════════════════════════════════
+# Dependencies
+# ═══════════════════════════════════════════════════════════════
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server (hook endpoints)
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+toml = { version = "0.8" }
+
+# Error handling
+thiserror = { version = "2" }
+
+# Concurrency
+parking_lot = { version = "0.12" }
+
+# Networking
+socket2 = { version = "0.5" }
+ureq = { version = "2" }
+
+# IDs + time
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Database (blackboard)
+rusqlite = { version = "0.32", optional = true }
+
+# Resilience
+tower = { version = "0.5", optional = true }
+
+# Monitoring (feature-gated)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry-otlp = { version = "0.27", optional = true }
+
+# Platform
+dirs = { version = "6" }
+libc = { version = "0.2" }
+
+# ═══════════════════════════════════════════════════════════════
+# Features
+# ═══════════════════════════════════════════════════════════════
+
+[features]
+default = ["api", "persistence", "bridges"]
+api = ["axum", "tower-http"]
+persistence = ["rusqlite"]
+bridges = []
+intelligence = ["tower"]
+monitoring = ["opentelemetry", "opentelemetry-otlp"]
+evolution = []
+full = ["api", "persistence", "bridges", "intelligence", "monitoring", "evolution"]
+
+# ═══════════════════════════════════════════════════════════════
+# Quality Gate
+# ═══════════════════════════════════════════════════════════════
+
+[quality]
+gate = ["check", "clippy", "pedantic", "test"]
+min_tests_per_module = 50
+deny_unwrap = true
+deny_unsafe = true
+k7_compliance = true
+k7_compliance_target = 99.0
+hebbian_feedback = true
+
+# ═══════════════════════════════════════════════════════════════
+# Consent (Habitat Philosophy)
+# ═══════════════════════════════════════════════════════════════
+
+[consent]
+sphere_can_add_modules = true
+sphere_can_skip_layers = true
+modulation_not_command = true
+implementation_order = "recommended"
+
+# ═══════════════════════════════════════════════════════════════
+# Layers (8 — custom ORAC structure)
+# ═══════════════════════════════════════════════════════════════
+
+[[layers]]
+key = "L1"
+dir_name = "m1_core"
+name = "Core"
+description = "Types, errors, config, constants, traits, validation"
+depends_on = []
+rationale = "Foundation layer — all other layers depend on this. Hot-swap M01-M06 from PV2."
+
+[[layers]]
+key = "L2"
+dir_name = "m2_wire"
+name = "Wire"
+description = "IPC client, bus types, V2 wire protocol"
+depends_on = ["L1"]
+rationale = "Unix socket connection to PV2 daemon. Hot-swap M29+M30 from PV2."
+
+[[layers]]
+key = "L3"
+dir_name = "m3_hooks"
+name = "Hooks"
+description = "HTTP hook server, 6 hook handlers, permission policy"
+depends_on = ["L1", "L2"]
+feature_gate = "api"
+rationale = "The keystone — replaces all 8 bash hooks with sub-ms HTTP endpoints on :8133."
+
+[[layers]]
+key = "L4"
+dir_name = "m4_intelligence"
+name = "Intelligence"
+description = "Hebbian STDP, coupling network, semantic router, circuit breaker, blackboard"
+depends_on = ["L1", "L2"]
+feature_gate = "intelligence"
+rationale = "Smart dispatch using Hebbian weights, content-aware routing, per-pane health gating. Hot-swap M16-M21 from PV2."
+
+[[layers]]
+key = "L5"
+dir_name = "m5_bridges"
+name = "Bridges"
+description = "SYNTHEX, ME, POVM, RM service bridges"
+depends_on = ["L1"]
+feature_gate = "bridges"
+rationale = "Direct service communication — thermal read, fitness signal, memory hydration, TSV persistence. Adapt M22, M24-M26 from PV2."
+
+[[layers]]
+key = "L6"
+dir_name = "m6_coordination"
+name = "Coordination"
+description = "Conductor, cascade, tick orchestrator, WASM bridge"
+depends_on = ["L1", "L2", "L4", "L5"]
+rationale = "Coordination substrate — conductor breathing, cascade handoffs, tick loop, FIFO/ring WASM bridge. Adapt M31, M33, M35 from PV2."
+
+[[layers]]
+key = "L7"
+dir_name = "m7_monitoring"
+name = "Monitoring"
+description = "OTel traces, Prometheus metrics, Kuramoto field dashboard"
+depends_on = ["L1", "L2", "L5"]
+feature_gate = "monitoring"
+rationale = "Observability layer — task lifecycle traces, per-agent metrics, field state dashboard."
+
+[[layers]]
+key = "L8"
+dir_name = "m8_evolution"
+name = "Evolution"
+description = "RALPH engine, emergence detector, correlation engine, fitness tensor"
+depends_on = ["L1", "L4", "L5", "L7"]
+feature_gate = "evolution"
+rationale = "Self-improving coordination via 5-phase RALPH loop. Multi-parameter mutation (NOT mono-parameter like ME BUG-035)."
+
+# ═══════════════════════════════════════════════════════════════
+# Modules (42 total across 8 layers)
+# ═══════════════════════════════════════════════════════════════
+
+# --- L1 Core (6 modules — hot-swap from PV2 M01-M06) ---
+
+[[modules]]
+layer = "L1"
+name = "m01_core_types"
+description = "Core types, identifiers, newtypes (PaneId, TaskId, OrderParameter, FleetMode)"
+test_kind = "unit"
+
+[[modules]]
+layer = "L1"
+name = "m02_error_handling"
+description = "Unified error enum with ErrorClassifier trait (Send + Sync + Debug)"
+test_kind = "unit"
+
+[[modules]]
+layer = "L1"
+name = "m03_config"
+description = "ORAC configuration from TOML + env overlay (port, bridges, hooks, evolution)"
+test_kind = "unit"
+
+[[modules]]
+layer = "L1"
+name = "m04_constants"
+description = "Named constants: thresholds, intervals, budgets, limits"
+test_kind = "unit"
+
+[[modules]]
+layer = "L1"
+name = "m05_traits"
+description = "Core traits (Oscillator, Learnable, Bridgeable, Persistable, FieldObserver)"
+test_kind = "unit"
+
+[[modules]]
+layer = "L1"
+name = "m06_validation"
+description = "Input validators for persona, tool_name, summary, frequency, phase, body"
+test_kind = "unit"
+
+# --- L2 Wire (3 modules — hot-swap M29+M30, new IPC client) ---
+
+[[modules]]
+layer = "L2"
+name = "m07_ipc_client"
+description = "Unix socket client connecting to PV2 daemon bus (V2 wire protocol)"
+test_kind = "async"
+depends_on = ["m01_core_types", "m02_error_handling"]
+
+[[modules]]
+layer = "L2"
+name = "m08_bus_types"
+description = "Bus frame types, task lifecycle, event subscription (NDJSON)"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+[[modules]]
+layer = "L2"
+name = "m09_wire_protocol"
+description = "V2 wire format: handshake, subscribe, frames, keepalive, V1 compat"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m08_bus_types"]
+
+# --- L3 Hooks (5 modules — NEW, the keystone) ---
+
+[[modules]]
+layer = "L3"
+name = "m10_hook_server"
+description = "Axum HTTP server on :8133 routing 6 hook endpoints"
+test_kind = "async"
+depends_on = ["m01_core_types", "m02_error_handling", "m03_config"]
+
+[[modules]]
+layer = "L3"
+name = "m11_session_hooks"
+description = "SessionStart (register sphere) and Stop (quality gate + deregister) handlers"
+test_kind = "async"
+depends_on = ["m10_hook_server", "m07_ipc_client"]
+
+[[modules]]
+layer = "L3"
+name = "m12_tool_hooks"
+description = "PostToolUse (Hebbian + task poll) and PreToolUse (thermal gate) handlers"
+test_kind = "async"
+depends_on = ["m10_hook_server", "m07_ipc_client"]
+
+[[modules]]
+layer = "L3"
+name = "m13_prompt_hooks"
+description = "UserPromptSubmit (inject field state) handler"
+test_kind = "async"
+depends_on = ["m10_hook_server", "m07_ipc_client"]
+
+[[modules]]
+layer = "L3"
+name = "m14_permission_policy"
+description = "PermissionRequest auto-approve/deny policy engine (fleet-wide + per-sphere)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m03_config"]
+
+# --- L4 Intelligence (7 modules — hot-swap M16-M21 + new) ---
+
+[[modules]]
+layer = "L4"
+name = "m15_coupling_network"
+description = "Kuramoto coupling matrix with phase dynamics (hot-swap M16)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m04_constants"]
+
+[[modules]]
+layer = "L4"
+name = "m16_auto_k"
+description = "Adaptive coupling strength with consent-gated adjustment (hot-swap M17)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m04_constants", "m15_coupling_network"]
+
+[[modules]]
+layer = "L4"
+name = "m17_topology"
+description = "Network topology analysis (hot-swap M18)"
+test_kind = "unit"
+depends_on = ["m15_coupling_network"]
+
+[[modules]]
+layer = "L4"
+name = "m18_hebbian_stdp"
+description = "Hebbian STDP learning with LTP/LTD dynamics (hot-swap M19)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m04_constants", "m15_coupling_network"]
+
+[[modules]]
+layer = "L4"
+name = "m19_buoy_network"
+description = "Buoy health tracking and spatial recall (hot-swap M20)"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+[[modules]]
+layer = "L4"
+name = "m20_semantic_router"
+description = "Content-aware dispatch using Hebbian weights and domain affinity"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m18_hebbian_stdp"]
+
+[[modules]]
+layer = "L4"
+name = "m21_circuit_breaker"
+description = "Per-pane health gating with tower-resilience (Closed/Open/HalfOpen FSM)"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+# --- L5 Bridges (5 modules — adapt from PV2 + new blackboard) ---
+
+[[modules]]
+layer = "L5"
+name = "m22_synthex_bridge"
+description = "SYNTHEX bridge — thermal read + Hebbian writeback (adapt M22)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m05_traits"]
+
+[[modules]]
+layer = "L5"
+name = "m23_me_bridge"
+description = "ME bridge — fitness signal read + frozen detection (adapt M24)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m05_traits"]
+
+[[modules]]
+layer = "L5"
+name = "m24_povm_bridge"
+description = "POVM bridge — memory hydration + crystallisation (adapt M25)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m05_traits"]
+
+[[modules]]
+layer = "L5"
+name = "m25_rm_bridge"
+description = "RM bridge — cross-session TSV persistence, NOT JSON (adapt M26)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m05_traits"]
+
+[[modules]]
+layer = "L5"
+name = "m26_blackboard"
+description = "SQLite shared fleet state — pane status, task history, agent cards"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m02_error_handling"]
+
+# --- L6 Coordination (5 modules — adapt from PV2 + new WASM bridge) ---
+
+[[modules]]
+layer = "L6"
+name = "m27_conductor"
+description = "PI controller for field breathing rhythm (adapt M31)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m04_constants"]
+
+[[modules]]
+layer = "L6"
+name = "m28_cascade"
+description = "Cascade handoff protocol with sphere mitosis (hot-swap M33)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m08_bus_types"]
+
+[[modules]]
+layer = "L6"
+name = "m29_tick"
+description = "Tick orchestrator with Hebbian Phase 2.5 wiring (adapt M35)"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m04_constants", "m15_coupling_network", "m18_hebbian_stdp"]
+
+[[modules]]
+layer = "L6"
+name = "m30_wasm_bridge"
+description = "FIFO/ring protocol bridge to Zellij swarm-orchestrator WASM plugin"
+test_kind = "async"
+depends_on = ["m01_core_types", "m08_bus_types"]
+
+[[modules]]
+layer = "L6"
+name = "m31_memory_manager"
+description = "Memory aggregation and pruning (hot-swap M21)"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+# --- L7 Monitoring (4 modules — NEW) ---
+
+[[modules]]
+layer = "L7"
+name = "m32_otel_traces"
+description = "OpenTelemetry trace export for task lifecycle across panes"
+test_kind = "async"
+depends_on = ["m01_core_types"]
+
+[[modules]]
+layer = "L7"
+name = "m33_metrics_export"
+description = "Prometheus-compatible metrics (per-agent tokens, latency, error rate)"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+[[modules]]
+layer = "L7"
+name = "m34_field_dashboard"
+description = "Kuramoto field metrics: per-cluster r, phase gaps, K effective"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m15_coupling_network"]
+
+[[modules]]
+layer = "L7"
+name = "m35_token_accounting"
+description = "Per-task token cost tracking and fleet budget management"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+# --- L8 Evolution (5 modules — cloned from ME with multi-param mutation fix) ---
+
+[[modules]]
+layer = "L8"
+name = "m36_ralph_engine"
+description = "5-phase RALPH loop: Recognize, Analyze, Learn, Propose, Harvest"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m02_error_handling"]
+
+[[modules]]
+layer = "L8"
+name = "m37_emergence_detector"
+description = "Emergence detection with ring buffer, TTL decay, cap 5000"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+[[modules]]
+layer = "L8"
+name = "m38_correlation_engine"
+description = "Pathway discovery and correlation mining"
+test_kind = "unit"
+depends_on = ["m01_core_types", "m37_emergence_detector"]
+
+[[modules]]
+layer = "L8"
+name = "m39_fitness_tensor"
+description = "12-dimensional weighted fitness evaluation"
+test_kind = "unit"
+depends_on = ["m01_core_types"]
+
+[[modules]]
+layer = "L8"
+name = "m40_mutation_selector"
+description = "Diversity-enforced parameter selection: round-robin, cooldown, rejection gate"
+test_kind = "property"
+depends_on = ["m01_core_types", "m36_ralph_engine"]
+
+# ═══════════════════════════════════════════════════════════════
+# Binary Targets
+# ═══════════════════════════════════════════════════════════════
+
+[[bin_targets]]
+name = "orac-sidecar"
+path = "src/bin/main.rs"
+kind = "daemon"
+
+[[bin_targets]]
+name = "orac-client"
+path = "src/bin/client.rs"
+kind = "client"
+
+[[bin_targets]]
+name = "orac-probe"
+path = "src/bin/probe.rs"
+kind = "probe"
+
+# ═══════════════════════════════════════════════════════════════
+# Implementation Order
+# ═══════════════════════════════════════════════════════════════
+
+[implementation]
+order = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
+
+# ═══════════════════════════════════════════════════════════════
+# Server Config (generates config/default.toml)
+# ═══════════════════════════════════════════════════════════════
+
+[config.server]
+bind_addr = "\"127.0.0.1\""
+port = 8133
+
+[config.ipc]
+pv2_socket = "\"/run/user/1000/pane-vortex-bus.sock\""
+pv2_http = "\"http://127.0.0.1:8132\""
+
+[config.bridges]
+synthex_addr = "\"127.0.0.1:8090\""
+me_addr = "\"127.0.0.1:8080\""
+povm_addr = "\"127.0.0.1:8125\""
+rm_addr = "\"127.0.0.1:8130\""
+
+[config.evolution]
+enabled = false
+emergence_cap = 5000
+mutation_cooldown_generations = 10
+diversity_window = 20
+diversity_threshold = 0.5
