@@ -232,8 +232,7 @@ impl IpcClient {
     ///
     /// # Errors
     /// - `PvError::BusSocket` if not connected.
-    #[allow(clippy::unused_async)] // Will use await in Phase 1 implementation
-    pub async fn subscribe(&mut self, patterns: Vec<String>) -> PvResult<usize> {
+    pub fn subscribe(&mut self, patterns: &[String]) -> PvResult<usize> {
         if !self.is_connected() {
             return Err(PvError::BusSocket("not connected".into()));
         }
@@ -249,8 +248,7 @@ impl IpcClient {
     ///
     /// # Errors
     /// - `PvError::BusSocket` if not connected or write fails.
-    #[allow(clippy::unused_async)] // Will use await in Phase 1 implementation
-    pub async fn send_frame(&self, _frame: &BusFrame) -> PvResult<()> {
+    pub fn send_frame(&self, _frame: &BusFrame) -> PvResult<()> {
         if !self.is_connected() {
             return Err(PvError::BusSocket("not connected".into()));
         }
@@ -267,8 +265,7 @@ impl IpcClient {
     ///
     /// # Errors
     /// - `PvError::BusSocket` if not connected.
-    #[allow(clippy::unused_async)] // Will use await in Phase 1 implementation
-    pub async fn recv_frame(&self) -> PvResult<BusFrame> {
+    pub fn recv_frame(&self) -> PvResult<BusFrame> {
         if !self.is_connected() {
             return Err(PvError::BusSocket("not connected".into()));
         }
@@ -283,8 +280,7 @@ impl IpcClient {
     ///
     /// # Errors
     /// - `PvError::BusSocket` if the disconnect message cannot be sent.
-    #[allow(clippy::unused_async)] // Will use await in Phase 1 implementation
-    pub async fn disconnect(&mut self) -> PvResult<()> {
+    pub fn disconnect(&mut self) -> PvResult<()> {
         if !self.is_connected() {
             return Ok(());
         }
@@ -365,34 +361,34 @@ mod tests {
         assert!(!client.is_connected());
     }
 
-    #[tokio::test]
-    async fn subscribe_without_connect_fails() {
+    #[test]
+    fn subscribe_without_connect_fails() {
         let mut client = IpcClient::new(pid("test"));
-        let result = client.subscribe(vec!["field.*".into()]).await;
+        let result = client.subscribe(&["field.*".into()]);
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn send_frame_without_connect_fails() {
+    #[test]
+    fn send_frame_without_connect_fails() {
         let client = IpcClient::new(pid("test"));
         let frame = BusFrame::Subscribe {
             patterns: vec!["*".into()],
         };
-        let result = client.send_frame(&frame).await;
+        let result = client.send_frame(&frame);
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn recv_frame_without_connect_fails() {
+    #[test]
+    fn recv_frame_without_connect_fails() {
         let client = IpcClient::new(pid("test"));
-        let result = client.recv_frame().await;
+        let result = client.recv_frame();
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn disconnect_when_not_connected_ok() {
+    #[test]
+    fn disconnect_when_not_connected_ok() {
         let mut client = IpcClient::new(pid("test"));
-        let result = client.disconnect().await;
+        let result = client.disconnect();
         assert!(result.is_ok());
     }
 

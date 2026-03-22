@@ -69,8 +69,8 @@ impl FieldState {
         let (sin_sum, cos_sum) = spheres.values().fold((0.0_f64, 0.0_f64), |(s, c), sp| {
             (s + sp.phase.sin(), c + sp.phase.cos())
         });
-        #[allow(clippy::cast_precision_loss)]
-        let r = sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / (n as f64);
+        let count = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+        let r = sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / count;
         let psi = sin_sum.atan2(cos_sum);
 
         let order = OrderParameter {
