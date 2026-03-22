@@ -6,6 +6,32 @@
 
 ---
 
+## Session 052 — Phase 1 Hooks Deployed (2026-03-22)
+
+**Status:** PHASE 1 COMPLETE — HTTP hook server live on :8133, 17/17 services healthy.
+
+### What Was Done (Session 052)
+1. **5 hook modules implemented** (m10-m14) — 2,405 LOC, quality gate 4/4 clean
+2. **m10_hook_server** (735 LOC) — Axum router, `OracState`, `HookEvent`/`HookResponse` types, HTTP helpers, health endpoint
+3. **m11_session_hooks** (398 LOC) — `SessionStart` (register+hydrate from POVM+RM), `Stop` (fail tasks, crystallize, deregister)
+4. **m12_tool_hooks** (559 LOC) — `PostToolUse` (memory+status, 1-in-5 task poll, atomic claim), `PreToolUse` (SYNTHEX thermal gate)
+5. **m13_prompt_hooks** (351 LOC) — `UserPromptSubmit` (inject r/tick/spheres/thermal + pending tasks)
+6. **m14_permission_policy** (362 LOC) — `PermissionRequest` auto-approve/deny engine (read=allow, write=notice, deny list)
+7. **main.rs wired** — Feature-gated `api` starts Axum, graceful shutdown on SIGINT
+8. **Binary deployed** — `~/.local/bin/orac-sidecar` (4.7MB), daemon running
+9. **Integration tested** — All 6 endpoints verified live: POVM hydration (110 mem, 2437 paths), field state (r=0.993), thermal check
+10. **Git committed + pushed** — `903fdd2` on main, pushed to GitLab
+11. **RM recorded** — `r69bf788f008a` deployment entry
+
+### Test Results
+- **699 tests** — 0 failures, 0 ignored
+- `cargo check` — 0 errors
+- `cargo clippy -D warnings` — 0 warnings
+- `cargo clippy -W pedantic` — 0 warnings
+- **Live integration** — 9/9 endpoint tests pass
+
+---
+
 ## Session 050 — Plan Complete (2026-03-22)
 
 **Status:** SCAFFOLD-READY — All pre-scaffold tasks complete. `plan.toml` created. Awaiting deploy order.
