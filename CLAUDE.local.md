@@ -1,8 +1,28 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.1.0","status":"PHASE_1_HOOKS_COMPLETE","phase":"phase-1-hooks","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":40,"layers":8,"bin_targets":3,"tests":699,"loc":2405,"clippy":0,"session":"052"}
+{"v":"0.1.0","status":"PHASE_2_INTELLIGENCE_COMPLETE","phase":"phase-2-intelligence","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","candidate_modules":{"files":24,"lines":15936,"drop_in":10516,"adapt":5420,"violations":0},"scaffold_modules":40,"layers":8,"bin_targets":3,"tests":972,"loc":4998,"clippy":0,"session":"053"}
 ```
+
+---
+
+## Session 053 — Phase 2 Intelligence Layer (2026-03-22)
+
+**Status:** PHASE 2 COMPLETE — 3 new modules, 2,593 LOC, quality gate 4/4 clean, 972 tests.
+
+### What Was Done (Session 053)
+1. **m20_semantic_router** (803 LOC) — Content-aware dispatch using Hebbian weights + domain affinity. 4 semantic domains (Read/Write/Execute/Communicate) mapped to Kuramoto phase regions. Tool classifier, content classifier, weighted composite scoring (domain 40% + Hebbian 35% + availability 25%), preferred pane bonus. 45 tests.
+2. **m21_circuit_breaker** (870 LOC) — Per-pane health gating with Closed/Open/HalfOpen FSM. Configurable failure/success thresholds, tick-based Open→HalfOpen timeout, probe request limiting. `BreakerRegistry` for fleet-wide management with `tick_all()`, `state_counts()`, independent per-pane tracking. 38 tests.
+3. **m26_blackboard** (920 LOC) — SQLite shared fleet state via rusqlite. 3 tables: `pane_status` (upsert/get/list/remove), `task_history` (insert/recent/count), `agent_cards` (A2A-inspired capability declarations). Indexed by pane_id and finished_at. In-memory mode for tests. 35 SQLite tests + 5 data type tests.
+4. **Quality gate 4/4 clean** — check 0, clippy 0, pedantic 0, 972 tests 0 failures
+5. **Feature gates** — `intelligence` (m20, m21), `persistence` (m26) — both already in Cargo.toml
+
+### Test Results
+- **972 tests** (--features full) — 0 failures, 0 ignored
+- **734 tests** (default features) — 0 failures
+- `cargo check` — 0 errors
+- `cargo clippy -D warnings` — 0 warnings
+- `cargo clippy -W pedantic` — 0 warnings
 
 ---
 
@@ -65,7 +85,7 @@
 ✅ Step 5: Phase 1 HTTP hooks (5 modules, 2,405 LOC, 699 tests, quality gate 4/4 clean)
 ✅ Step 6: Deploy binary + test against live PV2 (17/17 services, all 6 endpoints verified)
 ✅ Step 7: Git committed + pushed (903fdd2 + 4bf9335, GitLab main)
-⬜ Step 8: Phase 2 — Intelligence (m20 semantic router, m21 circuit breaker, m26 blackboard) ← NEXT
+✅ Step 8: Phase 2 — Intelligence (m20 semantic router, m21 circuit breaker, m26 blackboard)
 ⬜ Step 9: Migrate settings.json hooks from bash to HTTP (shared system change — needs operator approval)
 ⬜ Step 10: Phase 3 — Bridges + monitoring
 ⬜ Step 11: Phase 4 — Evolution (RALPH)
