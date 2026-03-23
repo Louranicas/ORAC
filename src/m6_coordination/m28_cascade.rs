@@ -6,7 +6,7 @@
 //! ## Layer: L7 | Module: M33 | Dependencies: L1, L7 (M29 bus, M30 types)
 //! ## NA Gap: NA-P-7 (cascade rejection) — V3.3.3 adds `reject_cascade` frame
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::m1_core::{
     m01_core_types::{now_secs, PaneId},
@@ -58,6 +58,12 @@ pub struct CascadeHandoff {
     pub rejected: bool,
     /// Rejection reason (if rejected).
     pub rejection_reason: Option<String>,
+    /// Consent snapshot from the source sphere at dispatch time.
+    ///
+    /// Maps field names (e.g. `"synthex_write"`, `"povm_write"`) to boolean values.
+    /// Propagated through re-cascades so downstream targets inherit the
+    /// original source's consent posture.
+    pub consent_snapshot: HashMap<String, bool>,
 }
 
 impl CascadeHandoff {
@@ -80,7 +86,26 @@ impl CascadeHandoff {
             acknowledged: false,
             rejected: false,
             rejection_reason: None,
+            consent_snapshot: HashMap::new(),
         }
+    }
+
+    /// Attach a consent snapshot to this handoff.
+    ///
+    /// The snapshot captures the source sphere's consent posture at dispatch time.
+    /// Downstream targets can check `consent_allows` to respect the originator's consent.
+    #[must_use]
+    pub fn with_consent(mut self, consent: HashMap<String, bool>) -> Self {
+        self.consent_snapshot = consent;
+        self
+    }
+
+    /// Check if a specific operation is consented in this cascade's snapshot.
+    ///
+    /// Returns `true` if the field is absent (default-open for backward compat).
+    #[must_use]
+    pub fn consent_allows(&self, field: &str) -> bool {
+        self.consent_snapshot.get(field).copied().unwrap_or(true)
     }
 
     /// Create a re-cascade (increment depth).
@@ -106,6 +131,7 @@ impl CascadeHandoff {
             acknowledged: false,
             rejected: false,
             rejection_reason: None,
+            consent_snapshot: self.consent_snapshot.clone(),
         }
     }
 
@@ -707,5 +733,124 @@ mod tests {
         assert_eq!(tracker.get(idx0).unwrap().depth, 1);
         assert_eq!(tracker.get(idx1).unwrap().depth, 2);
         assert_eq!(tracker.get(idx2).unwrap().depth, 3);
+    }
+
+    // ── Consent propagation through cascades ──
+
+    fn sample_consent() -> HashMap<String, bool> {
+        let mut m = HashMap::new();
+        m.insert("synthex_write".into(), true);
+        m.insert("povm_read".into(), true);
+        m.insert("povm_write".into(), false);
+        m.insert("hydration".into(), true);
+        m
+    }
+
+    #[test]
+    fn handoff_default_consent_empty() {
+        let h = CascadeHandoff::new(pid("a"), pid("b"), "brief".into());
+        assert!(h.consent_snapshot.is_empty());
+    }
+
+    #[test]
+    fn handoff_with_consent_attaches_snapshot() {
+        let h = CascadeHandoff::new(pid("a"), pid("b"), "brief".into())
+            .with_consent(sample_consent());
+        assert_eq!(h.consent_snapshot.len(), 4);
+        assert!(h.consent_snapshot["synthex_write"]);
+        assert!(!h.consent_snapshot["povm_write"]);
+    }
+
+    #[test]
+    fn consent_allows_returns_snapshot_value() {
+        let h = CascadeHandoff::new(pid("a"), pid("b"), "brief".into())
+            .with_consent(sample_consent());
+        assert!(h.consent_allows("synthex_write"));
+        assert!(h.consent_allows("povm_read"));
+        assert!(!h.consent_allows("povm_write"));
+        assert!(h.consent_allows("hydration"));
+    }
+
+    #[test]
+    fn consent_allows_unknown_field_defaults_true() {
+        let h = CascadeHandoff::new(pid("a"), pid("b"), "brief".into())
+            .with_consent(sample_consent());
+        assert!(h.consent_allows("unknown_field"));
+    }
+
+    #[test]
+    fn consent_allows_empty_snapshot_defaults_true() {
+        let h = CascadeHandoff::new(pid("a"), pid("b"), "brief".into());
+        assert!(h.consent_allows("povm_write"));
+        assert!(h.consent_allows("synthex_write"));
+    }
+
+    #[test]
+    fn re_cascade_propagates_consent() {
+        let h = CascadeHandoff::new(pid("a"), pid("b"), "brief".into())
+            .with_consent(sample_consent());
+        let re = h.re_cascade(pid("c"));
+        assert_eq!(re.consent_snapshot.len(), 4);
+        assert!(!re.consent_allows("povm_write"));
+        assert!(re.consent_allows("hydration"));
+        assert_eq!(re.source.as_str(), "b");
+        assert_eq!(re.target.as_str(), "c");
+    }
+
+    #[test]
+    fn re_cascade_chain_preserves_consent_through_3_hops() {
+        let h1 = CascadeHandoff::new(pid("origin"), pid("hop1"), "task".into())
+            .with_consent(sample_consent());
+        let h2 = h1.re_cascade(pid("hop2"));
+        let h3 = h2.re_cascade(pid("hop3"));
+
+        // Original consent preserved through 3 hops
+        assert!(!h3.consent_allows("povm_write"));
+        assert!(h3.consent_allows("synthex_write"));
+        assert!(h3.consent_allows("hydration"));
+        assert_eq!(h3.depth, 3);
+    }
+
+    #[test]
+    fn tracker_initiate_with_consent() {
+        let mut tracker = CascadeTracker::new();
+        let idx = tracker.initiate(pid("a"), pid("b"), "brief".into()).unwrap();
+        // Get the handoff, attach consent manually (tracker.initiate creates default)
+        let handoff = tracker.get(idx).unwrap();
+        assert!(handoff.consent_snapshot.is_empty());
+    }
+
+    #[test]
+    fn tracker_re_cascade_propagates_consent() {
+        let mut tracker = CascadeTracker::with_max_depth(5);
+
+        // Create initial with consent by replacing the entry
+        let idx0 = tracker.initiate(pid("a"), pid("b"), "task".into()).unwrap();
+        // Manually attach consent to the first entry
+        tracker.cascades[idx0].consent_snapshot = sample_consent();
+
+        let idx1 = tracker.re_cascade(idx0, pid("c")).unwrap();
+        let re = tracker.get(idx1).unwrap();
+        assert_eq!(re.consent_snapshot.len(), 4);
+        assert!(!re.consent_allows("povm_write"));
+    }
+
+    #[test]
+    fn restricted_consent_blocks_through_chain() {
+        let mut consent = HashMap::new();
+        consent.insert("synthex_write".into(), false);
+        consent.insert("hydration".into(), false);
+
+        let h1 = CascadeHandoff::new(pid("restrictive"), pid("b"), "task".into())
+            .with_consent(consent);
+        let h2 = h1.re_cascade(pid("c"));
+        let h3 = h2.re_cascade(pid("d"));
+
+        // Both restrictions survive the full chain
+        assert!(!h3.consent_allows("synthex_write"));
+        assert!(!h3.consent_allows("hydration"));
+        // Unspecified fields default open
+        assert!(h3.consent_allows("povm_read"));
+        assert!(h3.consent_allows("povm_write"));
     }
 }

@@ -15,16 +15,16 @@
 //! - Socket address: raw `host:port` (no `http://` prefix, BUG-033)
 //! - Poll interval configurable (default 6 ticks)
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
-
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::m1_core::m02_error_handling::{PvError, PvResult};
 use crate::m1_core::m04_constants;
 use crate::m1_core::m05_traits::Bridgeable;
+
+use super::http_helpers::{raw_http_get, raw_http_post};
+#[cfg(test)]
+use super::http_helpers::extract_body;
 
 // ──────────────────────────────────────────────────────────────
 // Constants
@@ -48,11 +48,7 @@ const INGEST_PATH: &str = "/api/ingest";
 /// Default poll interval in ticks.
 const DEFAULT_POLL_INTERVAL: u64 = 6;
 
-/// TCP connection timeout (milliseconds).
-const TCP_TIMEOUT_MS: u64 = 2000;
-
-/// Maximum response body size (bytes).
-const MAX_RESPONSE_SIZE: usize = 8192;
+// TCP_TIMEOUT_MS and MAX_RESPONSE_SIZE now in http_helpers (BUG-042)
 
 // ──────────────────────────────────────────────────────────────
 // Response types
@@ -332,123 +328,7 @@ impl Bridgeable for SynthexBridge {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
-// Raw TCP HTTP helpers
-// ──────────────────────────────────────────────────────────────
-
-/// Send a raw HTTP GET request over TCP and return the response body.
-///
-/// # Errors
-/// Returns `PvError::BridgeUnreachable` if the connection or I/O fails.
-/// Returns `PvError::BridgeParse` if no HTTP body separator is found.
-fn raw_http_get(addr: &str, path: &str, service: &str) -> PvResult<String> {
-    let timeout = Duration::from_millis(TCP_TIMEOUT_MS);
-    let mut stream = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .map_err(|_| PvError::BridgeUnreachable {
-                service: service.to_owned(),
-                url: addr.to_owned(),
-            })?,
-        timeout,
-    )
-    .map_err(|_| PvError::BridgeUnreachable {
-        service: service.to_owned(),
-        url: addr.to_owned(),
-    })?;
-
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|_| PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        })?;
-
-    let host = addr.split(':').next().unwrap_or("localhost");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).map_err(|_| {
-        PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        }
-    })?;
-
-    let mut buf = vec![0u8; MAX_RESPONSE_SIZE];
-    let mut total = 0;
-    loop {
-        match stream.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                if total >= MAX_RESPONSE_SIZE {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
-            Err(_) => {
-                return Err(PvError::BridgeUnreachable {
-                    service: service.to_owned(),
-                    url: addr.to_owned(),
-                });
-            }
-        }
-    }
-
-    let response = String::from_utf8_lossy(&buf[..total]);
-    extract_body(&response).ok_or_else(|| PvError::BridgeParse {
-        service: service.to_owned(),
-        reason: "no body in HTTP response".to_owned(),
-    })
-}
-
-/// Send a raw HTTP POST request over TCP (fire-and-forget).
-///
-/// # Errors
-/// Returns `PvError::BridgeUnreachable` if the connection fails.
-fn raw_http_post(addr: &str, path: &str, body: &[u8], service: &str) -> PvResult<()> {
-    let timeout = Duration::from_millis(TCP_TIMEOUT_MS);
-    let mut stream = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .map_err(|_| PvError::BridgeUnreachable {
-                service: service.to_owned(),
-                url: addr.to_owned(),
-            })?,
-        timeout,
-    )
-    .map_err(|_| PvError::BridgeUnreachable {
-        service: service.to_owned(),
-        url: addr.to_owned(),
-    })?;
-
-    let host = addr.split(':').next().unwrap_or("localhost");
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(request.as_bytes()).map_err(|_| {
-        PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        }
-    })?;
-    stream.write_all(body).map_err(|_| PvError::BridgeUnreachable {
-        service: service.to_owned(),
-        url: addr.to_owned(),
-    })?;
-
-    // Fire-and-forget: we don't wait for a response
-    Ok(())
-}
-
-/// Extract the body from a raw HTTP response string.
-///
-/// Looks for the `\r\n\r\n` header/body separator.
-fn extract_body(raw: &str) -> Option<String> {
-    raw.find("\r\n\r\n")
-        .map(|pos| raw[pos + 4..].to_owned())
-}
+// HTTP helpers now in super::http_helpers (BUG-042 fix)
 
 // ──────────────────────────────────────────────────────────────
 // Tests
@@ -871,11 +751,7 @@ mod tests {
         assert_eq!(THERMAL_PATH, "/v3/thermal");
     }
 
-    #[test]
-    fn max_response_size_is_reasonable() {
-        assert!(MAX_RESPONSE_SIZE >= 1024);
-        assert!(MAX_RESPONSE_SIZE <= 65536);
-    }
+    // max_response_size test moved to http_helpers (BUG-042)
 
     // ── BridgeState default ──
 

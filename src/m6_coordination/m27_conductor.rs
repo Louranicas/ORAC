@@ -30,11 +30,7 @@ const _DIVERGENCE_COOLDOWN_TICKS: u32 = 3;
 /// Minimum sphere count for emergent breathing to be meaningful.
 const MIN_SPHERES_FOR_BREATHING: usize = 3;
 
-/// EMA smoothing factor for divergence signal.
-const _DIVERGENCE_EMA_ALPHA: f64 = 0.2;
-
-/// EMA smoothing factor for coherence signal.
-const _COHERENCE_EMA_ALPHA: f64 = 0.2;
+// EMA smoothing alpha (0.2) is applied inside `AppState::update_emas`.
 
 // ──────────────────────────────────────────────────────────────
 // Conductor
@@ -46,15 +42,23 @@ const _COHERENCE_EMA_ALPHA: f64 = 0.2;
 /// `r` toward a dynamic `r_target`. In ORAC this is an advisory controller —
 /// the authoritative `k_modulation` lives in the PV2 daemon.
 ///
+/// # Design Note (BUG-L1-009)
+///
+/// Currently operates as a **P-only** controller. The `integral` field is
+/// reserved for future PI control but intentionally left at zero — in ORAC's
+/// advisory role, integral windup would fight PV2's authoritative K. The
+/// [`reset_integral`](Self::reset_integral) method exists for when PI mode is
+/// activated in a future phase.
+///
 /// # Thread Safety
 /// `Conductor` is `Send + Sync` (no interior mutability).
 #[derive(Debug, Clone)]
 pub struct Conductor {
-    /// Proportional gain for the PI controller.
+    /// Proportional gain for the P controller.
     gain: f64,
     /// Fraction of emergent signal blended into output (0.0-1.0).
     breathing_blend: f64,
-    /// Integral accumulator for the PI controller.
+    /// Integral accumulator — reserved for future PI mode, currently zero.
     integral: f64,
 }
 
@@ -131,8 +135,7 @@ impl Conductor {
         // Determine action based on error magnitude and thresholds
         let action = classify_error(r, state);
 
-        // Compute recommended k_delta from PI controller
-        // TODO: Phase 2 — integrate EMA-weighted divergence/coherence signals
+        // Compute recommended k_delta — P-only (BUG-L1-009: I-term reserved)
         let k_delta = error * self.gain;
         let k_delta_clamped = k_delta.clamp(
             m04_constants::K_MOD_BUDGET_MIN - 1.0,
@@ -146,6 +149,31 @@ impl Conductor {
                 "r={r:.3} target={target:.3} error={error:.3} k_delta={k_delta_clamped:.4}"
             ),
         }
+    }
+
+    /// Produce a decision AND apply tick-level state updates.
+    ///
+    /// This wraps [`decide`](Self::decide) and additionally:
+    /// - Updates `divergence_ema` / `coherence_ema` from the current error signal
+    /// - Decrements `divergence_cooldown` by one tick
+    /// - Writes back `prev_decision_action` for thrashing detection
+    pub fn decide_and_update(&self, state: &mut AppState) -> FieldDecision {
+        let decision = self.decide(state);
+
+        // Update EMAs with current signal values
+        let r = state.field.order.r;
+        let target = Self::r_target(state);
+        let divergence_signal = (target - r).max(0.0);
+        let coherence_signal = r;
+        state.update_emas(divergence_signal, coherence_signal);
+
+        // Tick the cooldown counter
+        state.tick_cooldown();
+
+        // Write back decision action for thrashing detection (Copy, not move)
+        state.prev_decision_action = decision.action;
+
+        decision
     }
 
     /// Get the current proportional gain.
@@ -466,5 +494,41 @@ mod tests {
         c.integral = 0.5;
         c.reset_integral();
         assert!(c.integral.abs() < f64::EPSILON);
+    }
+
+    // ── decide_and_update ──
+
+    #[test]
+    fn decide_and_update_writes_emas() {
+        let c = Conductor::new();
+        let mut state = make_state_with_spheres(5);
+        state.field.order.r = 0.5;
+        assert!(state.divergence_ema.abs() < f64::EPSILON);
+        assert!(state.coherence_ema.abs() < f64::EPSILON);
+
+        let _d = c.decide_and_update(&mut state);
+        assert!(state.divergence_ema > 0.0, "divergence_ema should be updated");
+        assert!(state.coherence_ema > 0.0, "coherence_ema should be updated");
+    }
+
+    #[test]
+    fn decide_and_update_decrements_cooldown() {
+        let c = Conductor::new();
+        let mut state = make_state_with_spheres(5);
+        state.divergence_cooldown = 3;
+        let _d = c.decide_and_update(&mut state);
+        assert_eq!(state.divergence_cooldown, 2);
+    }
+
+    #[test]
+    fn decide_and_update_writes_prev_action() {
+        let c = Conductor::new();
+        let mut state = make_state_with_spheres(5);
+        state.field.order.r = 0.3;
+        assert_eq!(state.prev_decision_action, FieldAction::Stable);
+
+        let d = c.decide_and_update(&mut state);
+        assert_eq!(state.prev_decision_action, d.action);
+        assert_eq!(state.prev_decision_action, FieldAction::NeedsCoherence);
     }
 }

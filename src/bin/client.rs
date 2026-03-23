@@ -3,6 +3,7 @@
 //! Sends commands to the running ORAC daemon via HTTP.
 //! Usage: `orac-client status | field | blackboard | metrics`
 
+use std::fmt::Write as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -14,15 +15,20 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let cmd = args.get(1).map_or("help", String::as_str);
+    let json_mode = args.iter().any(|a| a == "--json");
+    let cmd = args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("help", String::as_str);
 
     match cmd {
-        "status" => cmd_status(),
-        "field" => cmd_field(),
-        "blackboard" => cmd_blackboard(),
+        "status" => cmd_status_maybe_json(json_mode),
+        "field" => cmd_field_maybe_json(json_mode),
+        "blackboard" => cmd_blackboard_maybe_json(json_mode),
         "metrics" => cmd_metrics(),
         "hook-test" => cmd_hook_test(args.get(2).map(String::as_str)),
         "probe" => cmd_probe(),
+        "watch" => cmd_watch(),
+        "dispatch" => cmd_dispatch(&args[2..]),
+        "fleet" => cmd_fleet(json_mode),
+        "completions" => cmd_completions(args.get(2).map(String::as_str)),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -46,9 +52,89 @@ fn print_help() {
     println!("  metrics         Dump Prometheus-format metrics (raw)");
     println!("  hook-test <evt> Send test payload to a hook endpoint");
     println!("  probe           Run connectivity checks (ORAC, PV2, SYNTHEX, ME, POVM, RM)");
+    println!("  watch           Live dashboard — polls field state every 2s");
+    println!("  dispatch <desc> Submit a task to the fleet via PV2 bus");
+    println!("  fleet           List registered spheres with status");
+    println!("  completions <s> Emit shell completions (bash, zsh, fish)");
+    println!();
+    println!("Flags:");
+    println!("  --json          Machine-readable JSON (status, field, blackboard, fleet)");
+    println!();
+    println!("Dispatch options:");
+    println!("  --target <t>    any_idle (default), field_driven, willing, specific");
+    println!("  --submitter <s> Submitter ID (default: orac-client)");
     println!();
     println!("Hook events: SessionStart, Stop, PostToolUse, PreToolUse,");
     println!("             UserPromptSubmit, PermissionRequest");
+}
+
+/// GET /health — raw JSON or pretty-print.
+fn cmd_status_maybe_json(json_mode: bool) -> ExitCode {
+    if json_mode { return cmd_json("/health"); }
+    cmd_status()
+}
+
+/// GET /field — raw JSON or pretty-print.
+fn cmd_field_maybe_json(json_mode: bool) -> ExitCode {
+    if json_mode { return cmd_json("/field"); }
+    cmd_field()
+}
+
+/// GET /blackboard — raw JSON or pretty-print.
+fn cmd_blackboard_maybe_json(json_mode: bool) -> ExitCode {
+    if json_mode { return cmd_json("/blackboard"); }
+    cmd_blackboard()
+}
+
+/// List all registered fleet spheres from PV2.
+fn cmd_fleet(json_mode: bool) -> ExitCode {
+    let url = "http://127.0.0.1:8132/spheres";
+    let body = match fetch(url) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("PV2 unreachable: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json_mode {
+        println!("{body}");
+        return ExitCode::SUCCESS;
+    }
+
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        println!("{body}");
+        return ExitCode::SUCCESS;
+    };
+
+    let spheres = v.get("spheres").and_then(serde_json::Value::as_array);
+    let Some(spheres) = spheres else {
+        println!("No spheres data");
+        return ExitCode::SUCCESS;
+    };
+
+    println!("Fleet Spheres ({} registered)", spheres.len());
+    println!("{:-<60}", "");
+    println!("{:<30} {:<12} {:<8}", "ID", "STATUS", "FREQ");
+    println!("{:-<60}", "");
+
+    for s in spheres {
+        let id = s.get("id").and_then(serde_json::Value::as_str).unwrap_or("?");
+        let status = s.get("status").and_then(serde_json::Value::as_str).unwrap_or("?");
+        let freq = s.get("frequency").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        println!("{id:<30} {status:<12} {freq:.2}");
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Generic JSON output for --json flag.
+fn cmd_json(path: &str) -> ExitCode {
+    let url = format!("http://{ORAC_ADDR}{path}");
+    match fetch(&url) {
+        Ok(body) => { println!("{body}"); ExitCode::SUCCESS }
+        Err(e) => { eprintln!("{e}"); ExitCode::FAILURE }
+    }
 }
 
 /// GET /health — pretty-print ORAC status.
@@ -280,6 +366,325 @@ fn cmd_probe() -> ExitCode {
     }
 }
 
+/// Live dashboard — polls /health and /field every 2 seconds.
+fn cmd_watch() -> ExitCode {
+    println!("ORAC Watch — live dashboard (Ctrl+C to stop)\n");
+
+    loop {
+        // Fetch health + field in sequence
+        let health = fetch(&format!("http://{ORAC_ADDR}/health")).ok();
+        let field = fetch(&format!("http://{ORAC_ADDR}/field")).ok();
+
+        // Clear screen
+        print!("\x1b[2J\x1b[H");
+
+        println!("╔══════════════════════════════════════════╗");
+        println!("║  ORAC Watch — {}              ║", chrono::Local::now().format("%H:%M:%S"));
+        println!("╠══════════════════════════════════════════╣");
+
+        if let Some(h) = &health {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(h) {
+                let status = v["status"].as_str().unwrap_or("?");
+                let sessions = v["sessions"].as_u64().unwrap_or(0);
+                let ticks = v["uptime_ticks"].as_u64().unwrap_or(0);
+                println!("║  status:   {status:<28} ║");
+                println!("║  sessions: {sessions:<28} ║");
+                println!("║  ticks:    {ticks:<28} ║");
+            }
+        } else {
+            println!("║  ORAC: UNREACHABLE                       ║");
+        }
+
+        println!("╠══════════════════════════════════════════╣");
+
+        if let Some(f) = &field {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(f) {
+                let r = v["r"].as_f64().unwrap_or(0.0);
+                let k = v["k"].as_f64().unwrap_or(0.0);
+                let sph = v["sphere_count"].as_u64().unwrap_or(0);
+                let tick = v["pv2_tick"].as_u64().unwrap_or(0);
+                println!("║  r:        {r:<28.4} ║");
+                println!("║  K:        {k:<28.4} ║");
+                println!("║  spheres:  {sph:<28} ║");
+                println!("║  pv2_tick: {tick:<28} ║");
+            }
+        } else {
+            println!("║  PV2: UNREACHABLE                        ║");
+        }
+
+        println!("╚══════════════════════════════════════════╝");
+        println!("\n  Refreshing every 2s — Ctrl+C to stop");
+
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// Emit shell completion script for the given shell.
+///
+/// Usage: `eval "$(orac-client completions bash)"` in `.bashrc`,
+/// or `orac-client completions zsh > _orac-client` in fpath.
+fn cmd_completions(shell: Option<&str>) -> ExitCode {
+    let Some(shell) = shell else {
+        eprintln!("Usage: orac-client completions <bash|zsh|fish>");
+        return ExitCode::FAILURE;
+    };
+
+    match shell {
+        "bash" => print!("{}", bash_completions()),
+        "zsh" => print!("{}", zsh_completions()),
+        "fish" => print!("{}", fish_completions()),
+        other => {
+            eprintln!("Unknown shell '{other}'. Supported: bash, zsh, fish");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Subcommands for completion scripts.
+const SUBCOMMANDS: &str = "status field blackboard metrics hook-test probe watch dispatch fleet completions help";
+
+/// Hook event names for `hook-test` completion.
+const HOOK_EVENTS: &str = "SessionStart Stop PostToolUse PreToolUse UserPromptSubmit PermissionRequest";
+
+/// Dispatch targets for `--target` completion.
+const DISPATCH_TARGETS: &str = "any_idle field_driven willing specific";
+
+fn bash_completions() -> String {
+    format!(
+        r#"_orac_client() {{
+    local cur prev cmds
+    COMPREPLY=()
+    cur="${{COMP_WORDS[COMP_CWORD]}}"
+    prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+    cmds="{SUBCOMMANDS}"
+
+    case "$prev" in
+        orac-client)
+            COMPREPLY=( $(compgen -W "$cmds --json" -- "$cur") )
+            return 0
+            ;;
+        hook-test)
+            COMPREPLY=( $(compgen -W "{HOOK_EVENTS}" -- "$cur") )
+            return 0
+            ;;
+        completions)
+            COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+            return 0
+            ;;
+        --target)
+            COMPREPLY=( $(compgen -W "{DISPATCH_TARGETS}" -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--json --target --submitter" -- "$cur") )
+    fi
+}}
+complete -F _orac_client orac-client
+"#
+    )
+}
+
+fn zsh_completions() -> String {
+    format!(
+        r#"#compdef orac-client
+
+_orac_client() {{
+    local -a commands hook_events targets shells
+    commands=({SUBCOMMANDS})
+    hook_events=({HOOK_EVENTS})
+    targets=({DISPATCH_TARGETS})
+    shells=(bash zsh fish)
+
+    _arguments -C \
+        '1:command:->cmd' \
+        '*::arg:->args' \
+        '--json[Machine-readable JSON output]'
+
+    case "$state" in
+        cmd)
+            _describe 'command' commands
+            ;;
+        args)
+            case "$words[1]" in
+                hook-test)
+                    _describe 'event' hook_events
+                    ;;
+                completions)
+                    _describe 'shell' shells
+                    ;;
+                dispatch)
+                    _arguments \
+                        '--target[Dispatch target]:target:('"${{targets[*]}}"')' \
+                        '--submitter[Submitter ID]:submitter:'
+                    ;;
+            esac
+            ;;
+    esac
+}}
+
+_orac_client "$@"
+"#
+    )
+}
+
+fn fish_completions() -> String {
+    let mut out = String::from(
+        "# Fish completions for orac-client\n\
+         complete -c orac-client -e\n\n",
+    );
+
+    // Subcommands
+    let descs = [
+        ("status", "Show sidecar health and session info"),
+        ("field", "Show Kuramoto field state"),
+        ("blackboard", "Show fleet blackboard state"),
+        ("metrics", "Dump Prometheus-format metrics"),
+        ("hook-test", "Send test payload to a hook endpoint"),
+        ("probe", "Run connectivity checks"),
+        ("watch", "Live dashboard"),
+        ("dispatch", "Submit a task to the fleet"),
+        ("fleet", "List registered spheres"),
+        ("completions", "Emit shell completions"),
+        ("help", "Show help"),
+    ];
+
+    for (cmd, desc) in &descs {
+        let _ = writeln!(
+            out,
+            "complete -c orac-client -n '__fish_use_subcommand' -a '{cmd}' -d '{desc}'"
+        );
+    }
+
+    // Global flag
+    out.push_str(
+        "complete -c orac-client -l json -d 'Machine-readable JSON output'\n\n",
+    );
+
+    // hook-test events
+    for event in HOOK_EVENTS.split_whitespace() {
+        let _ = writeln!(
+            out,
+            "complete -c orac-client -n '__fish_seen_subcommand_from hook-test' -a '{event}'"
+        );
+    }
+
+    // completions shells
+    for shell in &["bash", "zsh", "fish"] {
+        let _ = writeln!(
+            out,
+            "complete -c orac-client -n '__fish_seen_subcommand_from completions' -a '{shell}'"
+        );
+    }
+
+    // dispatch flags
+    out.push_str(
+        "\ncomplete -c orac-client -n '__fish_seen_subcommand_from dispatch' -l target -ra 'any_idle field_driven willing specific'\n\
+         complete -c orac-client -n '__fish_seen_subcommand_from dispatch' -l submitter -r\n"
+    );
+
+    out
+}
+
+/// PV2 HTTP base address.
+const PV2_ADDR: &str = "127.0.0.1:8132";
+
+/// Submit a task to the PV2 bus via `POST /bus/submit`.
+///
+/// Usage: `orac-client dispatch "Review src/lib.rs" [--target any_idle] [--submitter me]`
+fn cmd_dispatch(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        eprintln!("Usage: orac-client dispatch <description> [--target <t>] [--submitter <s>]");
+        eprintln!("Targets: any_idle (default), field_driven, willing, specific");
+        return ExitCode::FAILURE;
+    }
+
+    let mut description = String::new();
+    let mut target = "any_idle";
+    let mut submitter = "orac-client";
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--target" => {
+                i += 1;
+                if i < args.len() {
+                    target = leak_str(&args[i]);
+                } else {
+                    eprintln!("--target requires a value");
+                    return ExitCode::FAILURE;
+                }
+            }
+            "--submitter" => {
+                i += 1;
+                if i < args.len() {
+                    submitter = leak_str(&args[i]);
+                } else {
+                    eprintln!("--submitter requires a value");
+                    return ExitCode::FAILURE;
+                }
+            }
+            other => {
+                if !description.is_empty() {
+                    description.push(' ');
+                }
+                description.push_str(other);
+            }
+        }
+        i += 1;
+    }
+
+    if description.is_empty() {
+        eprintln!("Error: task description is required");
+        return ExitCode::FAILURE;
+    }
+
+    let valid_targets = ["any_idle", "field_driven", "willing", "specific"];
+    if !valid_targets.contains(&target) {
+        eprintln!("Invalid target '{target}'. Valid: {}", valid_targets.join(", "));
+        return ExitCode::FAILURE;
+    }
+
+    let payload = serde_json::json!({
+        "description": description,
+        "target": target,
+        "submitter": submitter,
+    });
+
+    let url = format!("http://{PV2_ADDR}/bus/submit");
+    let body = match post_json(&url, &payload) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Task submission failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("Task Submitted");
+    println!("--------------");
+    if let Some(id) = body["task_id"].as_str() {
+        println!("  task_id:     {id}");
+    }
+    if let Some(s) = body["status"].as_str() {
+        println!("  status:      {s}");
+    }
+    println!("  description: {description}");
+    println!("  target:      {target}");
+    println!("  submitter:   {submitter}");
+
+    ExitCode::SUCCESS
+}
+
+/// Leak a `String` to get a `&'static str` for option parsing.
+///
+/// Safe for CLI tools — the program exits shortly after.
+fn leak_str(s: &str) -> &'static str {
+    Box::leak(s.to_owned().into_boxed_str())
+}
+
 // --- helpers ---
 
 /// Fetch a URL and return the response body as a string.
@@ -315,7 +720,7 @@ fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, S
         .into_string()
         .map_err(|e| format!("read body: {e}"))?;
 
-    if status != 200 {
+    if !(200..300).contains(&status) {
         return Err(format!("HTTP {status}: {text}"));
     }
 

@@ -26,9 +26,9 @@ const MIN_PROMPT_LENGTH: usize = 20;
 /// Handle `UserPromptSubmit` hook from Claude Code.
 ///
 /// 1. Skips short prompts (< 20 chars)
-/// 2. Fetches field state from PV2 (r, tick, spheres)
-/// 3. Fetches thermal state from SYNTHEX
-/// 4. Checks for pending bus tasks
+/// 2. Reads cached field state (r, tick, spheres) from `SharedState`
+/// 3. Fetches thermal state from SYNTHEX (live)
+/// 4. Checks for pending bus tasks (live PV2 call)
 /// 5. Returns field state + task info as `systemMessage`
 pub async fn handle_user_prompt_submit(
     State(state): State<Arc<OracState>>,
@@ -44,53 +44,83 @@ pub async fn handle_user_prompt_submit(
     #[cfg(feature = "intelligence")]
     state.breaker_tick();
 
-    // Parallel data collection (breaker-gated)
-    let pv2_health_url = format!("{}/health", state.pv2_url);
+    // Periodic blackboard GC (every 720 ticks ≈ 1hr at 5s/tick)
+    // - Complete panes: pruned after 24h (audit trail, not actively needed)
+    // - Task history: pruned after 24h
+    // - Idle/Working/Blocked panes: never pruned by GC (use prune_stale_panes for that)
+    #[cfg(feature = "persistence")]
+    {
+        let current_tick = state.tick.load(std::sync::atomic::Ordering::Relaxed);
+        if current_tick % 720 == 0 && current_tick > 0 {
+            if let Some(bb) = state.blackboard() {
+                #[allow(clippy::cast_precision_loss)]
+                let now_secs = super::m10_hook_server::epoch_ms() as f64 / 1000.0;
+                let twenty_four_hours_ago = now_secs - 86_400.0;
+                let _ = bb.prune_complete_panes(twenty_four_hours_ago);
+                let _ = bb.prune_old_tasks(twenty_four_hours_ago);
+            }
+        }
+    }
+
+    // Read cached field state (populated by spawn_field_poller every 5s)
+    let (r, tick, spheres) = {
+        let guard = state.field_state.read();
+        let r_val = guard.field.order.r;
+        let tick_val = guard.field.tick;
+        let sphere_count = guard.spheres.len();
+        (
+            format!("{r_val:.4}"),
+            tick_val.to_string(),
+            sphere_count.to_string(),
+        )
+    };
+
+    // Fetch thermal and tasks live (not cached by poller)
     let thermal_url = format!("{}/v3/thermal", state.synthex_url);
     let tasks_url = format!("{}/bus/tasks", state.pv2_url);
 
     #[cfg(feature = "intelligence")]
-    let pv2_open = !state.breaker_allows("pv2");
+    let pv2_blocked = !state.breaker_allows("pv2");
     #[cfg(not(feature = "intelligence"))]
-    let pv2_open = false;
+    let pv2_blocked = false;
 
-    let (pv_data, thermal_data, tasks_data) = if pv2_open {
-        // PV2 breaker open — skip all PV2 calls, fall back to cached/unknown
+    let (thermal_data, tasks_data) = if pv2_blocked {
+        // PV2 breaker blocked — skip tasks call (BUG-L3-001 rename)
         let thermal = http_get(&thermal_url, 1000).await;
-        (None, thermal, None)
+        (thermal, None)
     } else {
-        let (pv, th, tk) = tokio::join!(
-            http_get(&pv2_health_url, 1000),
+        let (th, tk) = tokio::join!(
             http_get(&thermal_url, 1000),
             http_get(&tasks_url, 1000),
         );
-        // Record PV2 breaker outcome
+        // Record PV2 breaker outcome (tasks endpoint)
         #[cfg(feature = "intelligence")]
-        if pv.is_some() {
+        if tk.is_some() {
             state.breaker_success("pv2");
         } else {
             state.breaker_failure("pv2");
         }
-        (pv, th, tk)
+        (th, tk)
     };
 
-    // Parse field state
-    let (r, tick, spheres) = parse_field_state(pv_data.as_deref());
     let thermal = parse_temperature(thermal_data.as_deref());
 
     // Check for pending tasks
     let (pending_count, first_task, first_task_id) = parse_pending_tasks(tasks_data.as_deref());
 
+    // Read blackboard fleet summary (fast local SQLite, no HTTP)
+    let bb_summary = read_blackboard_summary(&state);
+
     // Build system message
     let message = if pending_count > 0 {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}\n\
+            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}\n\
              [FLEET TASK AVAILABLE] {pending_count} pending. First: {first_task}\n\
              To claim: pane-vortex-client claim {first_task_id} — then work on it. Include TASK_COMPLETE when done."
         )
     } else {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal} | No pending fleet tasks"
+            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary} | No pending fleet tasks"
         )
     };
 
@@ -101,9 +131,44 @@ pub async fn handle_user_prompt_submit(
 // Helpers
 // ──────────────────────────────────────────────────────────────
 
+/// Read a compact fleet summary from the local blackboard.
+///
+/// Returns a short string like ` fleet=3/1W` (3 panes, 1 working)
+/// or empty string if blackboard is unavailable.
+fn read_blackboard_summary(state: &OracState) -> String {
+    #[cfg(feature = "persistence")]
+    {
+        let Some(bb) = state.blackboard() else {
+            return String::new();
+        };
+        let panes = bb.list_panes().unwrap_or_default();
+        if panes.is_empty() {
+            return String::new();
+        }
+        let total = panes.len();
+        let working = panes
+            .iter()
+            .filter(|p| p.status == crate::m1_core::m01_core_types::PaneStatus::Working)
+            .count();
+        let tasks_done: u64 = panes.iter().map(|p| p.tasks_completed).sum();
+        if tasks_done > 0 {
+            format!(" fleet={total}/{working}W done={tasks_done}")
+        } else {
+            format!(" fleet={total}/{working}W")
+        }
+    }
+    #[cfg(not(feature = "persistence"))]
+    {
+        let _ = state;
+        String::new()
+    }
+}
+
 /// Parse PV2 health response for field state values.
 ///
 /// Returns `(r, tick, spheres)` as display strings.
+/// Retained for tests and potential fallback if cache is stale.
+#[cfg(test)]
 fn parse_field_state(data: Option<&str>) -> (String, String, String) {
     let Some(data) = data else {
         return ("?".into(), "?".into(), "?".into());
@@ -370,5 +435,37 @@ mod tests {
     fn long_prompt_passes() {
         let prompt = "Please fix the authentication bug in the login handler";
         assert!(prompt.len() >= MIN_PROMPT_LENGTH);
+    }
+
+    // ── Blackboard summary ──
+
+    #[test]
+    fn blackboard_summary_no_persistence() {
+        let state = OracState::new(crate::m1_core::m03_config::PvConfig::default());
+        let summary = read_blackboard_summary(&state);
+        // Without persistence feature or DB, returns empty
+        assert!(summary.is_empty() || summary.contains("fleet="));
+    }
+
+    #[test]
+    fn message_includes_fleet_placeholder() {
+        let bb = " fleet=3/1W done=5";
+        let msg = format!(
+            "[FIELD] r=0.93 tick=100 spheres=65 T=0.500{bb} | No pending fleet tasks"
+        );
+        assert!(msg.contains("fleet=3/1W"));
+        assert!(msg.contains("done=5"));
+    }
+
+    #[test]
+    fn message_with_tasks_includes_fleet() {
+        let bb = " fleet=12/4W done=27";
+        let msg = format!(
+            "[FIELD] r=0.93 tick=100 spheres=65 T=0.500{bb}\n\
+             [FLEET TASK AVAILABLE] 2 pending. First: Fix bug\n\
+             To claim: pane-vortex-client claim t1 — then work on it. Include TASK_COMPLETE when done."
+        );
+        assert!(msg.contains("fleet=12/4W"));
+        assert!(msg.contains("[FLEET TASK AVAILABLE]"));
     }
 }

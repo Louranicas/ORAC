@@ -28,19 +28,18 @@
 //! - `ureq` for synchronous HTTP to PV2/SYNTHEX/POVM/RM via `spawn_blocking`
 
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
-use crate::m1_core::field_state::{self, SharedState};
-use crate::m1_core::m01_core_types::PaneId;
+use crate::m1_core::field_state::{self, FieldState, SharedState};
+use crate::m1_core::m01_core_types::{PaneId, PaneSphere};
 use crate::m1_core::m03_config::PvConfig;
 
 #[cfg(feature = "evolution")]
@@ -266,6 +265,22 @@ pub struct HealthResponse {
     pub sessions: usize,
     /// Uptime tick counter.
     pub uptime_ticks: u64,
+    /// RALPH evolution generation counter.
+    #[cfg(feature = "evolution")]
+    pub ralph_gen: u64,
+    /// RALPH current phase name.
+    #[cfg(feature = "evolution")]
+    pub ralph_phase: String,
+    /// RALPH current fitness score.
+    #[cfg(feature = "evolution")]
+    pub ralph_fitness: f64,
+    /// IPC bus connection state (`"disconnected"`, `"connecting"`, `"connected"`).
+    pub ipc_state: String,
+    /// Circuit breaker states per bridge (service name -> state string).
+    #[cfg(feature = "intelligence")]
+    pub breakers: serde_json::Value,
+    /// Total semantic routing dispatches.
+    pub dispatch_total: u64,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -279,6 +294,8 @@ pub struct SessionTracker {
     pub pane_id: PaneId,
     /// Active task ID (if any).
     pub active_task_id: Option<String>,
+    /// Epoch ms when the active task was claimed (for duration tracking).
+    pub active_task_claimed_ms: Option<u64>,
     /// Tool call counter for throttling.
     pub poll_counter: u64,
     /// Total tool calls in this session (for ghost enrichment).
@@ -315,6 +332,8 @@ pub struct OracState {
     pub sessions: RwLock<HashMap<String, SessionTracker>>,
     /// Global tick counter for uptime.
     pub tick: AtomicU64,
+    /// IPC bus connection state string (updated by IPC event loop).
+    pub ipc_state: RwLock<String>,
     /// Ghost traces of deregistered spheres (FIFO, max 20).
     pub ghosts: RwLock<VecDeque<OracGhost>>,
     /// Per-sphere consent declarations (FIX-018).
@@ -330,6 +349,25 @@ pub struct OracState {
     /// Circuit breaker registry for external service calls.
     #[cfg(feature = "intelligence")]
     pub breakers: RwLock<BreakerRegistry>,
+    /// Semantic routing dispatch counters (total + per-domain).
+    pub dispatch_total: AtomicU64,
+    /// Dispatch counter for `Read` domain tasks.
+    pub dispatch_read: AtomicU64,
+    /// Dispatch counter for `Write` domain tasks.
+    pub dispatch_write: AtomicU64,
+    /// Dispatch counter for `Execute` domain tasks.
+    pub dispatch_execute: AtomicU64,
+    /// Dispatch counter for `Communicate` domain tasks.
+    pub dispatch_communicate: AtomicU64,
+    /// In-process trace store for `OTel`-style span recording (feature-gated).
+    #[cfg(feature = "monitoring")]
+    pub trace_store: crate::m7_monitoring::m32_otel_traces::TraceStore,
+    /// Kuramoto field dashboard for `/dashboard` endpoint (feature-gated).
+    #[cfg(feature = "monitoring")]
+    pub dashboard: crate::m7_monitoring::m34_field_dashboard::FieldDashboard,
+    /// Token accounting registry for `/tokens` endpoint (feature-gated).
+    #[cfg(feature = "monitoring")]
+    pub token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant,
 }
 
 impl OracState {
@@ -345,6 +383,7 @@ impl OracState {
             field_state: field_state::new_shared_state(),
             sessions: RwLock::new(HashMap::new()),
             tick: AtomicU64::new(0),
+            ipc_state: RwLock::new("disconnected".into()),
             ghosts: RwLock::new(VecDeque::new()),
             consents: RwLock::new(HashMap::new()),
             #[cfg(feature = "persistence")]
@@ -354,6 +393,17 @@ impl OracState {
             coupling: RwLock::new(CouplingNetwork::new()),
             #[cfg(feature = "intelligence")]
             breakers: RwLock::new(init_breaker_registry()),
+            dispatch_total: AtomicU64::new(0),
+            dispatch_read: AtomicU64::new(0),
+            dispatch_write: AtomicU64::new(0),
+            dispatch_execute: AtomicU64::new(0),
+            dispatch_communicate: AtomicU64::new(0),
+            #[cfg(feature = "monitoring")]
+            trace_store: crate::m7_monitoring::m32_otel_traces::TraceStore::new(),
+            #[cfg(feature = "monitoring")]
+            dashboard: crate::m7_monitoring::m34_field_dashboard::FieldDashboard::new(),
+            #[cfg(feature = "monitoring")]
+            token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant::new(),
         }
     }
 
@@ -375,6 +425,7 @@ impl OracState {
             rm_url,
             sessions: RwLock::new(HashMap::new()),
             tick: AtomicU64::new(0),
+            ipc_state: RwLock::new("disconnected".into()),
             ghosts: RwLock::new(VecDeque::new()),
             consents: RwLock::new(HashMap::new()),
             #[cfg(feature = "persistence")]
@@ -384,6 +435,17 @@ impl OracState {
             coupling: RwLock::new(CouplingNetwork::new()),
             #[cfg(feature = "intelligence")]
             breakers: RwLock::new(init_breaker_registry()),
+            dispatch_total: AtomicU64::new(0),
+            dispatch_read: AtomicU64::new(0),
+            dispatch_write: AtomicU64::new(0),
+            dispatch_execute: AtomicU64::new(0),
+            dispatch_communicate: AtomicU64::new(0),
+            #[cfg(feature = "monitoring")]
+            trace_store: crate::m7_monitoring::m32_otel_traces::TraceStore::new(),
+            #[cfg(feature = "monitoring")]
+            dashboard: crate::m7_monitoring::m34_field_dashboard::FieldDashboard::new(),
+            #[cfg(feature = "monitoring")]
+            token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant::new(),
         }
     }
 
@@ -392,6 +454,7 @@ impl OracState {
         let tracker = SessionTracker {
             pane_id,
             active_task_id: None,
+            active_task_claimed_ms: None,
             poll_counter: 0,
             total_tool_calls: 0,
             started_ms: epoch_ms(),
@@ -416,6 +479,17 @@ impl OracState {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Update the IPC connection state string.
+    pub fn set_ipc_state(&self, new_state: &str) {
+        new_state.clone_into(&mut self.ipc_state.write());
+    }
+
+    /// Get the current IPC connection state.
+    #[must_use]
+    pub fn get_ipc_state(&self) -> String {
+        self.ipc_state.read().clone()
+    }
+
     /// Access the local `SQLite` blackboard (if persistence is enabled and DB opened).
     #[cfg(feature = "persistence")]
     #[must_use]
@@ -425,8 +499,29 @@ impl OracState {
 
     /// Record a ghost trace for a deregistered sphere.
     ///
-    /// Maintains a FIFO ring of the last 20 ghost entries.
+    /// Maintains a FIFO ring of the last 20 ghost entries in memory,
+    /// and persists to the blackboard `SQLite` if available.
     pub fn add_ghost(&self, ghost: OracGhost) {
+        // Persist to SQLite blackboard
+        #[cfg(feature = "persistence")]
+        if let Some(bb) = self.blackboard() {
+            use crate::m5_bridges::m26_blackboard::GhostRecord;
+            let record = GhostRecord {
+                sphere_id: ghost.sphere_id.clone(),
+                persona: ghost.persona.clone(),
+                deregistered_ms: ghost.deregistered_ms,
+                final_phase: ghost.final_phase,
+                total_tools: ghost.total_tools,
+                session_duration_ms: ghost.session_duration_ms,
+            };
+            if let Err(e) = bb.insert_ghost(&record) {
+                tracing::debug!("blackboard insert_ghost failed: {e}");
+            }
+            // Keep SQLite bounded to 100 entries
+            let _ = bb.prune_ghosts(100);
+        }
+
+        // In-memory ring buffer
         let mut ghosts = self.ghosts.write();
         if ghosts.len() >= MAX_GHOSTS {
             ghosts.pop_front();
@@ -467,36 +562,71 @@ impl OracState {
     }
 
     /// Update consent fields for a sphere. Returns list of updated field names.
+    ///
+    /// Also persists changes to the blackboard consent audit trail.
     pub fn update_consent(
         &self,
         sphere_id: &str,
         update: &ConsentUpdateRequest,
     ) -> Vec<&'static str> {
         let mut updated = Vec::new();
+        let mut audit_entries: Vec<(&'static str, bool, bool)> = Vec::new();
         let mut guard = self.consents.write();
         let consent = guard
             .entry(sphere_id.to_owned())
             .or_insert_with(OracConsent::fully_open);
 
         if let Some(v) = update.synthex_write {
+            if consent.synthex_write != v {
+                audit_entries.push(("synthex_write", consent.synthex_write, v));
+            }
             consent.synthex_write = v;
             updated.push("synthex_write");
         }
         if let Some(v) = update.povm_read {
+            if consent.povm_read != v {
+                audit_entries.push(("povm_read", consent.povm_read, v));
+            }
             consent.povm_read = v;
             updated.push("povm_read");
         }
         if let Some(v) = update.povm_write {
+            if consent.povm_write != v {
+                audit_entries.push(("povm_write", consent.povm_write, v));
+            }
             consent.povm_write = v;
             updated.push("povm_write");
         }
         if let Some(v) = update.hydration {
+            if consent.hydration != v {
+                audit_entries.push(("hydration", consent.hydration, v));
+            }
             consent.hydration = v;
             updated.push("hydration");
         }
         if !updated.is_empty() {
             consent.updated_ms = epoch_ms();
         }
+        drop(guard);
+
+        // Persist audit trail to blackboard
+        #[cfg(feature = "persistence")]
+        if !audit_entries.is_empty() {
+            if let Some(bb) = self.blackboard() {
+                use crate::m5_bridges::m26_blackboard::ConsentAuditEntry;
+                let now = epoch_ms();
+                for (field, old, new) in &audit_entries {
+                    let _ = bb.insert_consent_audit(&ConsentAuditEntry {
+                        sphere_id: sphere_id.to_owned(),
+                        field_name: (*field).to_owned(),
+                        old_value: *old,
+                        new_value: *new,
+                        changed_ms: now,
+                    });
+                }
+            }
+        }
+
         updated
     }
 
@@ -535,14 +665,134 @@ impl OracState {
     pub fn breaker_state_counts(&self) -> (usize, usize, usize) {
         self.breakers.read().state_counts()
     }
+
+    /// Record a semantic routing dispatch for the given domain.
+    pub fn record_dispatch(
+        &self,
+        domain: &crate::m4_intelligence::m20_semantic_router::SemanticDomain,
+    ) {
+        use crate::m4_intelligence::m20_semantic_router::SemanticDomain;
+        self.dispatch_total.fetch_add(1, Ordering::Relaxed);
+        match domain {
+            SemanticDomain::Read => {
+                self.dispatch_read.fetch_add(1, Ordering::Relaxed);
+            }
+            SemanticDomain::Write => {
+                self.dispatch_write.fetch_add(1, Ordering::Relaxed);
+            }
+            SemanticDomain::Execute => {
+                self.dispatch_execute.fetch_add(1, Ordering::Relaxed);
+            }
+            SemanticDomain::Communicate => {
+                self.dispatch_communicate.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Read dispatch counters as `(total, read, write, execute, communicate)`.
+    #[must_use]
+    pub fn dispatch_counts(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.dispatch_total.load(Ordering::Relaxed),
+            self.dispatch_read.load(Ordering::Relaxed),
+            self.dispatch_write.load(Ordering::Relaxed),
+            self.dispatch_execute.load(Ordering::Relaxed),
+            self.dispatch_communicate.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Collect a fitness `TensorValues` from blackboard fleet metrics + field state.
+    ///
+    /// Populates dimensions that can be derived from local state:
+    /// - D1 `field_coherence`: from cached r value
+    /// - D3 `task_throughput`: completed tasks / total panes (normalized)
+    /// - D4 `error_rate`: 1.0 - (failed / total tasks) (inverted)
+    /// - D9 `fleet_utilization`: working panes / total panes
+    /// - D11 `consent_compliance`: fraction of spheres with default-open consent
+    ///
+    /// Dimensions without local data are left at 0.5 (neutral).
+    #[cfg(feature = "evolution")]
+    #[must_use]
+    pub fn collect_tensor(&self) -> crate::m8_evolution::m39_fitness_tensor::TensorValues {
+        use crate::m8_evolution::m39_fitness_tensor::{FitnessDimension, TensorValues};
+
+        let mut tensor = TensorValues::uniform(0.5); // neutral baseline
+
+        // D1: field_coherence — from cached field state
+        {
+            let guard = self.field_state.read();
+            let r = guard.field.order.r;
+            tensor.set(FitnessDimension::FieldCoherence, r.clamp(0.0, 1.0));
+        }
+
+        // D9, D3, D4: from blackboard (if available)
+        #[cfg(feature = "persistence")]
+        if let Some(bb) = self.blackboard() {
+            let panes = bb.list_panes().unwrap_or_default();
+            let total_panes = panes.len();
+
+            if total_panes > 0 {
+                // D9: fleet_utilization — fraction of panes that are Working
+                let working = panes
+                    .iter()
+                    .filter(|p| {
+                        p.status == crate::m1_core::m01_core_types::PaneStatus::Working
+                    })
+                    .count();
+                #[allow(clippy::cast_precision_loss)]
+                let utilization = working as f64 / total_panes as f64;
+                tensor.set(FitnessDimension::FleetUtilization, utilization);
+
+                // D3: task_throughput — avg tasks_completed per pane (capped at 1.0 for 10+ tasks)
+                #[allow(clippy::cast_precision_loss)]
+                let avg_tasks = panes.iter().map(|p| p.tasks_completed).sum::<u64>() as f64
+                    / total_panes as f64;
+                tensor.set(FitnessDimension::TaskThroughput, (avg_tasks / 10.0).min(1.0));
+            }
+
+            // D4: error_rate (inverted) — 1.0 - (failed / total)
+            let total_tasks = bb.task_count().unwrap_or(0);
+            if total_tasks > 0 {
+                // Count failed tasks by iterating recent tasks across all panes
+                let mut failed = 0_u64;
+                for pane in &panes {
+                    if let Ok(tasks) = bb.recent_tasks(&pane.pane_id, 100) {
+                        failed += tasks.iter().filter(|t| t.outcome == "failed").count() as u64;
+                    }
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let fail_rate = failed as f64 / total_tasks as f64;
+                tensor.set(FitnessDimension::ErrorRate, (1.0 - fail_rate).clamp(0.0, 1.0));
+            }
+        }
+
+        // D11: consent_compliance — fraction of spheres with default-open consent
+        {
+            let consents = self.consents.read();
+            let total = consents.len();
+            if total > 0 {
+                let compliant = consents
+                    .values()
+                    .filter(|c| c.hydration && c.povm_read)
+                    .count();
+                #[allow(clippy::cast_precision_loss)]
+                let compliance = compliant as f64 / total as f64;
+                tensor.set(FitnessDimension::ConsentCompliance, compliance);
+            }
+        }
+
+        tensor
+    }
 }
 
 /// Create and populate the default breaker registry with per-service configs.
 #[cfg(feature = "intelligence")]
 fn init_breaker_registry() -> BreakerRegistry {
     let mut reg = BreakerRegistry::new(BreakerConfig::default());
-    reg.register(PaneId::new("pv2"), BreakerConfig::aggressive());
-    reg.register(PaneId::new("synthex"), BreakerConfig::aggressive());
+    // BUG-038 fix: aggressive() tripped too easily on transient failures.
+    // PV2 is a local service — default config (threshold=5, timeout=30) is sufficient.
+    reg.register(PaneId::new("pv2"), BreakerConfig::default());
+    reg.register(PaneId::new("synthex"), BreakerConfig::default());
     reg.register(PaneId::new("me"), BreakerConfig::tolerant());
     reg.register(PaneId::new("povm"), BreakerConfig::default());
     reg.register(PaneId::new("rm"), BreakerConfig::default());
@@ -608,6 +858,7 @@ pub fn breaker_guarded_post(state: &Arc<OracState>, service: &str, url: String, 
 ///
 /// Runs until the process shuts down. If PV2 is unreachable,
 /// the cached state remains unchanged (graceful degradation).
+#[allow(clippy::too_many_lines)] // BUG-038 fix added breaker integration lines
 pub fn spawn_field_poller(state: Arc<OracState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -617,7 +868,24 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
             interval.tick().await;
 
             let health_url = format!("{}/health", state.pv2_url);
-            let Some(health_json) = http_get(&health_url, 2000).await else {
+            let spheres_url = format!("{}/spheres", state.pv2_url);
+
+            // Fetch health and spheres in parallel
+            let (health_resp, spheres_resp) = tokio::join!(
+                http_get(&health_url, 2000),
+                http_get(&spheres_url, 2000),
+            );
+
+            // BUG-038 fix: advance breaker ticks from poller (every 5s)
+            // so Open→HalfOpen transitions happen reliably, not just in prompt hooks.
+            #[cfg(feature = "intelligence")]
+            state.breaker_tick();
+
+            let Some(health_json) = health_resp else {
+                state.field_state.write().record_poll_miss();
+                // BUG-038 fix: record PV2 failure so breaker state is accurate
+                #[cfg(feature = "intelligence")]
+                state.breaker_failure("pv2");
                 tracing::debug!("field poller: PV2 unreachable");
                 continue;
             };
@@ -629,16 +897,112 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
             let r = parsed.get("r").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
             let pv2_tick = parsed.get("tick").and_then(serde_json::Value::as_u64).unwrap_or(0);
 
+            // Parse spheres into HashMap if available.
+            // PV2 /spheres returns {"spheres": [...]} with compact fields:
+            //   id, persona, status, phase, frequency, memories (count, not Vec),
+            //   receptivity, total_steps. Missing fields like buoys, opt_out_hebbian
+            //   would cause Vec<SphereMemory> deserialization failure (BUG-038).
+            // Use a lightweight struct matching PV2's actual wire format.
+            let sphere_map: HashMap<PaneId, PaneSphere> = spheres_resp
+                .and_then(|s| {
+                    #[derive(serde::Deserialize)]
+                    struct PvSphereCompact {
+                        id: String,
+                        #[serde(default)]
+                        persona: String,
+                        #[serde(default)]
+                        status: String,
+                        #[serde(default)]
+                        phase: f64,
+                        #[serde(default)]
+                        frequency: f64,
+                        #[serde(default)]
+                        receptivity: f64,
+                        #[serde(default)]
+                        total_steps: u64,
+                    }
+
+                    impl PvSphereCompact {
+                        fn into_pane_sphere(self) -> PaneSphere {
+                            use crate::m1_core::m01_core_types::PaneStatus;
+                            let status = match self.status.as_str() {
+                                "Working" | "working" => PaneStatus::Working,
+                                "Blocked" | "blocked" => PaneStatus::Blocked,
+                                "Complete" | "complete" => PaneStatus::Complete,
+                                _ => PaneStatus::Idle,
+                            };
+                            PaneSphere {
+                                id: PaneId::new(&self.id),
+                                persona: self.persona,
+                                status,
+                                phase: self.phase,
+                                frequency: self.frequency,
+                                receptivity: self.receptivity.max(0.01),
+                                total_steps: self.total_steps,
+                                ..PaneSphere::default()
+                            }
+                        }
+                    }
+
+                    #[derive(serde::Deserialize)]
+                    struct SpheresResponse {
+                        spheres: Vec<PvSphereCompact>,
+                    }
+
+                    serde_json::from_str::<SpheresResponse>(&s)
+                        .map(|resp| resp.spheres)
+                        .or_else(|_| serde_json::from_str::<Vec<PvSphereCompact>>(&s))
+                        .ok()
+                })
+                .map(|vec| {
+                    vec.into_iter()
+                        .map(|sp| {
+                            let ps = sp.into_pane_sphere();
+                            (ps.id.clone(), ps)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             // Update SharedState — minimal lock scope
             {
                 let mut guard = state.field_state.write();
-                guard.field.order.r = r.clamp(0.0, 1.0);
-                guard.field.order_parameter.r = r.clamp(0.0, 1.0);
-                guard.field.tick = pv2_tick;
+
+                if sphere_map.is_empty() {
+                    // No sphere data — update from health only
+                    guard.field.order.r = r.clamp(0.0, 1.0);
+                    guard.field.tick = pv2_tick;
+                } else {
+                    // Full recompute from sphere phases
+                    guard.spheres = sphere_map;
+                    guard.field = FieldState::compute(&guard.spheres, pv2_tick);
+                }
+
                 guard.tick = pv2_tick;
                 guard.push_r(r);
                 guard.tick_warmup();
+                guard.record_poll_success();
             }
+
+            // BUG-043 fix: Update dashboard with field state on each poll tick
+            #[cfg(feature = "monitoring")]
+            {
+                let guard = state.field_state.read();
+                let k_eff = {
+                    let c = state.coupling.read();
+                    c.k * c.k_modulation
+                };
+                state.dashboard.update_tick(
+                    guard.field.tick,
+                    &guard.field.order,
+                    k_eff,
+                );
+            }
+
+            // BUG-038 fix: record PV2 success against breaker.
+            // The field poller proves PV2 is healthy — keep breaker Closed.
+            #[cfg(feature = "intelligence")]
+            state.breaker_success("pv2");
 
             tracing::trace!(r, pv2_tick, "field state updated from PV2");
         }
@@ -701,58 +1065,131 @@ pub fn generate_pane_id() -> PaneId {
 async fn health_handler(
     State(state): State<Arc<OracState>>,
 ) -> Json<HealthResponse> {
+    #[cfg(feature = "evolution")]
+    let ralph_state = state.ralph.state();
+
     Json(HealthResponse {
         status: "healthy",
         service: "orac-sidecar",
         port: state.config.server.port,
         sessions: state.session_count(),
         uptime_ticks: state.tick.load(Ordering::Relaxed),
+        #[cfg(feature = "evolution")]
+        ralph_gen: ralph_state.generation,
+        #[cfg(feature = "evolution")]
+        ralph_phase: ralph_state.phase.to_string(),
+        #[cfg(feature = "evolution")]
+        ralph_fitness: ralph_state.current_fitness,
+        ipc_state: state.ipc_state.read().clone(),
+        #[cfg(feature = "intelligence")]
+        breakers: {
+            let summaries = state.breakers.read().all_summaries();
+            let map: std::collections::HashMap<String, String> = summaries
+                .iter()
+                .map(|(id, s)| (id.as_str().to_owned(), s.state.to_string()))
+                .collect();
+            serde_json::to_value(map).unwrap_or_default()
+        },
+        dispatch_total: state.dispatch_total.load(Ordering::Relaxed),
     })
 }
 
-/// Field state handler — proxies current Kuramoto field from PV2.
+/// Field state handler — returns cached field state, enriched with live PV2 `k`/`k_mod`.
 ///
-/// Returns the live field state including `r`, `K`, spheres, and chimera detection.
-/// Falls back to cached state if PV2 is unreachable.
+/// Primary source: `SharedState` cache (populated by poller every 5s).
+/// Enrichment: live PV2 `/health` for `k` and `k_mod` (not cached by poller).
+/// Falls back to cache-only if PV2 is unreachable.
 async fn field_handler(
     State(state): State<Arc<OracState>>,
 ) -> Json<serde_json::Value> {
-    let pv2_url = format!("{}/health", state.pv2_url);
-    let spheres_url = format!("{}/spheres", state.pv2_url);
-
-    let health = http_get(&pv2_url, 2000).await;
-    let spheres = http_get(&spheres_url, 2000).await;
+    // Read cached field state (sub-microsecond)
+    let (r, cached_tick, sphere_count, field_is_stale) = {
+        let guard = state.field_state.read();
+        (
+            guard.field.order.r,
+            guard.field.tick,
+            guard.spheres.len(),
+            guard.is_stale(),
+        )
+    };
 
     let mut result = serde_json::json!({
-        "source": "pv2_proxy",
+        "source": if field_is_stale { "cache_stale" } else { "cache" },
         "tick": state.tick.load(Ordering::Relaxed),
+        "r": r,
+        "sphere_count": sphere_count,
+        "pv2_tick": cached_tick,
+        "stale": field_is_stale,
     });
 
-    if let Some(h) = health {
+    // Enrich with k/k_mod from live PV2 (not cached by poller)
+    let pv2_url = format!("{}/health", state.pv2_url);
+    if let Some(h) = http_get(&pv2_url, 2000).await {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&h) {
-            result["r"] = v.get("r").cloned().unwrap_or_default();
             result["k"] = v.get("k").cloned().unwrap_or_default();
             result["k_mod"] = v.get("k_mod").cloned().unwrap_or_default();
-            result["sphere_count"] = v.get("spheres").cloned().unwrap_or_default();
-            result["pv2_tick"] = v.get("tick").cloned().unwrap_or_default();
+            result["source"] = serde_json::json!("cache_enriched");
         }
     }
 
-    if let Some(s) = spheres {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            result["spheres"] = v;
-        }
+    // Enrich with emergence data from RALPH EmergenceDetector
+    #[cfg(feature = "evolution")]
+    {
+        let detector = state.ralph.emergence();
+        let recent = detector.recent(5);
+        let emergence_list: Vec<serde_json::Value> = recent
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "type": e.emergence_type.to_string(),
+                    "severity": e.severity_class.to_string(),
+                    "confidence": e.confidence,
+                    "description": e.description,
+                    "detected_at_tick": e.detected_at_tick,
+                    "ttl": e.ttl,
+                })
+            })
+            .collect();
+
+        let em_stats = detector.stats();
+        result["emergence"] = serde_json::json!({
+            "total_detected": em_stats.total_detected,
+            "active_monitors": detector.active_monitor_count(),
+            "history_len": detector.history_len(),
+            "by_type": em_stats.by_type,
+            "recent": emergence_list,
+        });
     }
 
     Json(result)
 }
 
-/// Blackboard handler — returns current session and fleet state.
+/// Query parameters for the `/blackboard` endpoint.
 ///
-/// Provides a read-only view of ORAC's tracked sessions.
+/// All fields are optional filters. When absent, all records are returned.
+#[derive(Debug, Deserialize)]
+struct BlackboardQuery {
+    /// Filter panes by status (Idle, Working, Blocked, Complete).
+    status: Option<String>,
+    /// Filter panes updated after this Unix timestamp (seconds).
+    since: Option<f64>,
+    /// Limit number of recent tasks returned (default 20).
+    task_limit: Option<usize>,
+}
+
+/// Blackboard handler — returns session tracking + persistent fleet state.
+///
+/// Merges in-memory session data with `SQLite` blackboard (pane status,
+/// agent cards, task history). Supports query filters:
+/// - `?status=Working` — only panes with this status
+/// - `?since=1711100000` — only panes updated after this timestamp
+/// - `?task_limit=50` — max recent tasks per pane (default 20)
+#[allow(clippy::too_many_lines)] // Structured by section: sessions, panes, cards, tasks, RALPH
 async fn blackboard_handler(
     State(state): State<Arc<OracState>>,
+    Query(query): Query<BlackboardQuery>,
 ) -> Json<serde_json::Value> {
+    // In-memory sessions
     let sessions = state.sessions.read();
     let session_list: Vec<serde_json::Value> = sessions
         .iter()
@@ -767,23 +1204,154 @@ async fn blackboard_handler(
         .collect();
     drop(sessions);
 
-    Json(serde_json::json!({
+    // BUG-L3-004 fix: Use SQLite pane_count as authoritative fleet_size (SSOT).
+    // In-memory session_list.len() may diverge from SQLite if sessions leak.
+    let fleet_size = {
+        #[cfg(feature = "persistence")]
+        {
+            state
+                .blackboard()
+                .and_then(|bb| bb.pane_count().ok())
+                .map_or(session_list.len(), |n| n)
+        }
+        #[cfg(not(feature = "persistence"))]
+        {
+            session_list.len()
+        }
+    };
+
+    let mut result = serde_json::json!({
         "sessions": session_list,
-        "fleet_size": session_list.len(),
+        "fleet_size": fleet_size,
         "uptime_ticks": state.tick.load(Ordering::Relaxed),
-    }))
+    });
+
+    // Persistent blackboard data (if available)
+    #[cfg(feature = "persistence")]
+    if let Some(bb) = state.blackboard() {
+        // Pane status — apply filters
+        let mut panes: Vec<serde_json::Value> = bb
+            .list_panes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| {
+                if let Some(ref s) = query.status {
+                    if format!("{}", p.status) != *s {
+                        return false;
+                    }
+                }
+                if let Some(since) = query.since {
+                    if p.updated_at < since {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|p| {
+                serde_json::json!({
+                    "pane_id": p.pane_id.as_str(),
+                    "status": format!("{}", p.status),
+                    "persona": p.persona,
+                    "tasks_completed": p.tasks_completed,
+                    "updated_at": p.updated_at,
+                    "phase": p.phase,
+                })
+            })
+            .collect();
+        panes.sort_by(|a, b| {
+            let ta = a["updated_at"].as_f64().unwrap_or(0.0);
+            let tb = b["updated_at"].as_f64().unwrap_or(0.0);
+            tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Agent cards
+        let cards: Vec<serde_json::Value> = bb
+            .list_cards()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| {
+                serde_json::json!({
+                    "pane_id": c.pane_id.as_str(),
+                    "capabilities": c.capabilities,
+                    "domain": c.domain,
+                    "model": c.model,
+                })
+            })
+            .collect();
+
+        // Recent tasks — across all panes, limited
+        let task_limit = query.task_limit.unwrap_or(20);
+        let mut all_tasks: Vec<serde_json::Value> = Vec::new();
+        for pane in bb.list_panes().unwrap_or_default() {
+            if let Ok(tasks) = bb.recent_tasks(&pane.pane_id, task_limit) {
+                for t in tasks {
+                    all_tasks.push(serde_json::json!({
+                        "task_id": t.task_id,
+                        "pane_id": t.pane_id.as_str(),
+                        "description": t.description,
+                        "outcome": t.outcome,
+                        "finished_at": t.finished_at,
+                        "duration_secs": t.duration_secs,
+                    }));
+                }
+            }
+        }
+        all_tasks.sort_by(|a, b| {
+            let ta = a["finished_at"].as_f64().unwrap_or(0.0);
+            let tb = b["finished_at"].as_f64().unwrap_or(0.0);
+            tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_tasks.truncate(task_limit);
+
+        result["pane_status"] = serde_json::json!(panes);
+        result["pane_count"] = serde_json::json!(panes.len());
+        result["agent_cards"] = serde_json::json!(cards);
+        result["recent_tasks"] = serde_json::json!(all_tasks);
+        result["task_count"] = serde_json::json!(bb.task_count().unwrap_or(0));
+    }
+
+    // RALPH evolution state (BUG-044: was missing from /blackboard)
+    #[cfg(feature = "evolution")]
+    {
+        result["ralph"] = build_ralph_json(&state);
+    }
+
+    Json(result)
+}
+
+/// Build RALPH evolution state as JSON (BUG-044 fix).
+///
+/// Extracted from `blackboard_handler` to keep function length within clippy limits.
+#[cfg(feature = "evolution")]
+fn build_ralph_json(state: &OracState) -> serde_json::Value {
+    let rs = state.ralph.state();
+    let st = state.ralph.stats();
+    serde_json::json!({
+        "generation": rs.generation,
+        "phase": rs.phase.to_string(),
+        "fitness": rs.current_fitness,
+        "peak_fitness": st.peak_fitness,
+        "paused": rs.paused,
+        "completed_cycles": rs.completed_cycles,
+        "mutations": {
+            "proposed": st.total_proposed,
+            "accepted": st.total_accepted,
+            "rolled_back": st.total_rolled_back,
+            "skipped": st.total_skipped,
+        }
+    })
 }
 
 /// Metrics handler — Prometheus-compatible text format.
 ///
-/// Reports sessions, uptime, and bridge connectivity.
+/// Reports sessions, uptime, and blackboard fleet metrics.
 async fn metrics_handler(
     State(state): State<Arc<OracState>>,
 ) -> (axum::http::StatusCode, [(axum::http::HeaderName, &'static str); 1], String) {
     let sessions = state.session_count();
     let uptime = state.tick.load(Ordering::Relaxed);
 
-    let body = format!(
+    let mut body = format!(
         "# HELP orac_sessions_active Active session count\n\
          # TYPE orac_sessions_active gauge\n\
          orac_sessions_active {sessions}\n\
@@ -793,11 +1361,160 @@ async fn metrics_handler(
          orac_uptime_ticks {uptime}\n"
     );
 
+    // Blackboard fleet metrics
+    #[cfg(feature = "persistence")]
+    if let Some(bb) = state.blackboard() {
+        use crate::m1_core::m01_core_types::PaneStatus;
+        use std::fmt::Write;
+
+        let panes = bb.list_panes().unwrap_or_default();
+        let (idle, working, blocked, complete) =
+            panes
+                .iter()
+                .fold((0_u64, 0_u64, 0_u64, 0_u64), |(i, w, b, c), p| match p.status {
+                    PaneStatus::Idle => (i + 1, w, b, c),
+                    PaneStatus::Working => (i, w + 1, b, c),
+                    PaneStatus::Blocked => (i, w, b + 1, c),
+                    PaneStatus::Complete => (i, w, b, c + 1),
+                });
+        let tasks_completed: u64 = panes.iter().map(|p| p.tasks_completed).sum();
+        let task_history = bb.task_count().unwrap_or(0);
+        let agent_cards = bb.card_count().unwrap_or(0);
+        let _ = write!(
+            body,
+            "\n# HELP orac_panes_by_status Number of panes per operational status\n\
+             # TYPE orac_panes_by_status gauge\n\
+             orac_panes_by_status{{status=\"Idle\"}} {idle}\n\
+             orac_panes_by_status{{status=\"Working\"}} {working}\n\
+             orac_panes_by_status{{status=\"Blocked\"}} {blocked}\n\
+             orac_panes_by_status{{status=\"Complete\"}} {complete}\n\
+             \n\
+             # HELP orac_tasks_completed_total Tasks completed across all panes\n\
+             # TYPE orac_tasks_completed_total counter\n\
+             orac_tasks_completed_total {tasks_completed}\n\
+             \n\
+             # HELP orac_task_history_total Task records in audit history\n\
+             # TYPE orac_task_history_total counter\n\
+             orac_task_history_total {task_history}\n\
+             \n\
+             # HELP orac_agent_cards_registered Registered agent capability cards\n\
+             # TYPE orac_agent_cards_registered gauge\n\
+             orac_agent_cards_registered {agent_cards}\n"
+        );
+    }
+
+    // Semantic routing dispatch counters
+    {
+        use std::fmt::Write;
+        let (total, read, write, execute, communicate) = state.dispatch_counts();
+        let _ = write!(
+            body,
+            "\n# HELP orac_dispatch_total Total semantic routing dispatches\n             # TYPE orac_dispatch_total counter\n             orac_dispatch_total {total}\n             \n             # HELP orac_dispatch_by_domain Dispatches per semantic domain\n             # TYPE orac_dispatch_by_domain counter\n             orac_dispatch_by_domain{{domain=\"Read\"}} {read}\n             orac_dispatch_by_domain{{domain=\"Write\"}} {write}\n             orac_dispatch_by_domain{{domain=\"Execute\"}} {execute}\n             orac_dispatch_by_domain{{domain=\"Communicate\"}} {communicate}\n"
+        );
+    }
+
+    // Circuit breaker state per bridge
+    #[cfg(feature = "intelligence")]
+    {
+        use std::fmt::Write;
+        let summaries = state.breakers.read().all_summaries();
+        let _ = write!(
+            body,
+            "\n# HELP orac_breaker_state Circuit breaker state per bridge (0=Closed, 1=Open, 2=HalfOpen)\n             # TYPE orac_breaker_state gauge\n"
+        );
+        for (pane_id, summary) in &summaries {
+            let state_val = match summary.state {
+                crate::m4_intelligence::m21_circuit_breaker::BreakerState::Closed => 0,
+                crate::m4_intelligence::m21_circuit_breaker::BreakerState::Open => 1,
+                crate::m4_intelligence::m21_circuit_breaker::BreakerState::HalfOpen => 2,
+            };
+            let _ = writeln!(
+                body,
+                "orac_breaker_state{{bridge=\"{}\"}} {state_val}",
+                pane_id.as_str(),
+            );
+        }
+
+        let _ = write!(
+            body,
+            "\n# HELP orac_breaker_failures_total Lifetime failure count per bridge\n             # TYPE orac_breaker_failures_total counter\n"
+        );
+        for (pane_id, summary) in &summaries {
+            let _ = writeln!(
+                body,
+                "orac_breaker_failures_total{{bridge=\"{}\"}} {}",
+                pane_id.as_str(), summary.total_failures,
+            );
+        }
+    }
+
+    // RALPH evolution metrics
+    #[cfg(feature = "evolution")]
+    append_ralph_metrics(&mut body, &state);
+
     (
         axum::http::StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
+}
+
+/// Append RALPH evolution + emergence metrics in Prometheus text format.
+#[cfg(feature = "evolution")]
+fn append_ralph_metrics(body: &mut String, orac: &OracState) {
+    use std::fmt::Write;
+    let rs = orac.ralph.state();
+    let st = orac.ralph.stats();
+    let em = orac.ralph.emergence();
+
+    let _ = write!(
+        body,
+        "\n# HELP orac_ralph_generation Current RALPH generation counter\n\
+         # TYPE orac_ralph_generation counter\n\
+         orac_ralph_generation {}\n\
+         \n\
+         # HELP orac_ralph_completed_cycles Completed RALPH 5-phase cycles\n\
+         # TYPE orac_ralph_completed_cycles counter\n\
+         orac_ralph_completed_cycles {}\n\
+         \n\
+         # HELP orac_ralph_fitness Current RALPH fitness score\n\
+         # TYPE orac_ralph_fitness gauge\n\
+         orac_ralph_fitness {:.4}\n\
+         \n\
+         # HELP orac_ralph_peak_fitness Peak fitness observed\n\
+         # TYPE orac_ralph_peak_fitness gauge\n\
+         orac_ralph_peak_fitness {:.4}\n\
+         \n\
+         # HELP orac_ralph_paused Whether RALPH is paused (0=running, 1=paused)\n\
+         # TYPE orac_ralph_paused gauge\n\
+         orac_ralph_paused {}\n\
+         \n\
+         # HELP orac_ralph_mutations_total RALPH mutation outcomes\n\
+         # TYPE orac_ralph_mutations_total counter\n\
+         orac_ralph_mutations_total{{outcome=\"proposed\"}} {}\n\
+         orac_ralph_mutations_total{{outcome=\"accepted\"}} {}\n\
+         orac_ralph_mutations_total{{outcome=\"rolled_back\"}} {}\n\
+         orac_ralph_mutations_total{{outcome=\"skipped\"}} {}\n\
+         \n\
+         # HELP orac_emergence_total Total emergence events detected\n\
+         # TYPE orac_emergence_total counter\n\
+         orac_emergence_total {}\n\
+         \n\
+         # HELP orac_emergence_active_monitors Active emergence monitors\n\
+         # TYPE orac_emergence_active_monitors gauge\n\
+         orac_emergence_active_monitors {}\n",
+        rs.generation,
+        rs.completed_cycles,
+        rs.current_fitness,
+        st.peak_fitness,
+        u8::from(rs.paused),
+        st.total_proposed,
+        st.total_accepted,
+        st.total_rolled_back,
+        st.total_skipped,
+        em.stats().total_detected,
+        em.active_monitor_count(),
+    );
 }
 
 /// List ghost traces of deregistered spheres (FIX-019).
@@ -876,6 +1593,106 @@ async fn consent_put_handler(
 }
 
 // ──────────────────────────────────────────────────────────────
+// Monitoring endpoint handlers (BUG-043 fix)
+// ──────────────────────────────────────────────────────────────
+
+/// Traces handler — returns `OTel`-style span summary and recent spans.
+///
+/// Reads from the in-process `TraceStore` ring buffer, returning
+/// both aggregate statistics and the most recent 50 completed spans.
+#[cfg(feature = "monitoring")]
+async fn traces_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.trace_store.summary();
+    let recent = state.trace_store.recent(50);
+    let spans: Vec<serde_json::Value> = recent.iter().map(|s| {
+        serde_json::json!({
+            "name": s.name,
+            "status": format!("{:?}", s.status),
+            "start_secs": s.start_secs,
+            "duration_ms": s.duration_ms(),
+        })
+    }).collect();
+    Json(serde_json::json!({
+        "summary": {
+            "buffered": summary.buffered,
+            "capacity": summary.capacity,
+            "total_recorded": summary.total_recorded,
+            "total_errors": summary.total_errors,
+            "total_dropped": summary.total_dropped,
+        },
+        "recent": spans,
+    }))
+}
+
+/// Traces fallback handler when the `monitoring` feature is disabled.
+#[cfg(not(feature = "monitoring"))]
+async fn traces_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "monitoring feature not enabled",
+    }))
+}
+
+/// Dashboard handler — returns Kuramoto field dashboard snapshot.
+///
+/// Includes global order parameter, effective coupling, sphere/cluster
+/// counts, chimera detection, and `r` trend statistics.
+#[cfg(feature = "monitoring")]
+async fn dashboard_endpoint_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let snap = state.dashboard.snapshot();
+    Json(serde_json::json!({
+        "tick": snap.tick,
+        "r": snap.order.r,
+        "psi": snap.order.psi,
+        "k_effective": snap.k_effective,
+        "sphere_count": snap.sphere_count,
+        "cluster_count": snap.clusters.len(),
+        "chimera_detected": snap.chimera_detected,
+        "r_mean": state.dashboard.r_mean(),
+        "r_stddev": state.dashboard.r_stddev(),
+        "r_trend": state.dashboard.r_trend(),
+    }))
+}
+
+/// Dashboard fallback handler when the `monitoring` feature is disabled.
+#[cfg(not(feature = "monitoring"))]
+async fn dashboard_endpoint_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "monitoring feature not enabled",
+    }))
+}
+
+/// Tokens handler — returns fleet token accounting summary.
+///
+/// Reports fleet-wide input/output token totals, pane count,
+/// budget status, and remaining budget.
+#[cfg(feature = "monitoring")]
+async fn tokens_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.token_accountant.summary();
+    Json(serde_json::json!({
+        "total_input": summary.fleet_total.input_tokens,
+        "total_output": summary.fleet_total.output_tokens,
+        "total_panes": summary.pane_count,
+        "budget_remaining": summary.remaining_budget,
+        "budget_status": format!("{:?}", summary.budget_status),
+        "utilization": summary.utilization,
+    }))
+}
+
+/// Tokens fallback handler when the `monitoring` feature is disabled.
+#[cfg(not(feature = "monitoring"))]
+async fn tokens_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "monitoring feature not enabled",
+    }))
+}
+
+// ──────────────────────────────────────────────────────────────
 // Router construction
 // ──────────────────────────────────────────────────────────────
 
@@ -890,6 +1707,9 @@ pub fn build_router(state: Arc<OracState>) -> Router {
         .route("/blackboard", get(blackboard_handler))
         .route("/metrics", get(metrics_handler))
         .route("/field/ghosts", get(field_ghosts_handler))
+        .route("/traces", get(traces_handler))
+        .route("/dashboard", get(dashboard_endpoint_handler))
+        .route("/tokens", get(tokens_handler))
         .route(
             "/consent/{sphere_id}",
             get(consent_get_handler).put(consent_put_handler),
@@ -919,40 +1739,6 @@ pub fn build_router(state: Arc<OracState>) -> Router {
             post(super::m14_permission_policy::handle_permission_request),
         )
         .with_state(state)
-}
-
-/// Start the ORAC HTTP hook server.
-///
-/// Binds to the configured address and port, then serves requests
-/// until the shutdown signal is received.
-///
-/// # Errors
-///
-/// Returns an error if the server cannot bind to the configured address.
-pub async fn start_server(state: Arc<OracState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addr = SocketAddr::new(
-        state
-            .config
-            .server
-            .bind_addr
-            .parse()
-            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-        state.config.server.port,
-    );
-
-    let router = build_router(Arc::clone(&state));
-
-    tracing::info!(%addr, "ORAC hook server starting");
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("ORAC hook server shutting down");
-        })
-        .await?;
-
-    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1160,12 +1946,14 @@ mod tests {
         let tracker = SessionTracker {
             pane_id: PaneId::new("test"),
             active_task_id: None,
+            active_task_claimed_ms: None,
             poll_counter: 0,
             total_tool_calls: 0,
             started_ms: 0,
             persona: String::new(),
         };
         assert!(tracker.active_task_id.is_none());
+        assert!(tracker.active_task_claimed_ms.is_none());
         assert_eq!(tracker.poll_counter, 0);
         assert_eq!(tracker.total_tool_calls, 0);
     }
@@ -1175,12 +1963,14 @@ mod tests {
         let tracker = SessionTracker {
             pane_id: PaneId::new("test"),
             active_task_id: Some("task-42".into()),
+            active_task_claimed_ms: Some(1_742_600_000_000),
             poll_counter: 5,
             total_tool_calls: 87,
             started_ms: 1_742_600_000_000,
             persona: "/home/user/project".into(),
         };
         assert_eq!(tracker.active_task_id.as_deref(), Some("task-42"));
+        assert_eq!(tracker.active_task_claimed_ms, Some(1_742_600_000_000));
         assert_eq!(tracker.poll_counter, 5);
         assert_eq!(tracker.total_tool_calls, 87);
         assert_eq!(tracker.persona, "/home/user/project");
@@ -1206,10 +1996,44 @@ mod tests {
             port: 8133,
             sessions: 3,
             uptime_ticks: 42,
+            #[cfg(feature = "evolution")]
+            ralph_gen: 7,
+            #[cfg(feature = "evolution")]
+            ralph_phase: "Recognize".into(),
+            #[cfg(feature = "evolution")]
+            ralph_fitness: 0.85,
+            ipc_state: "disconnected".into(),
+            #[cfg(feature = "intelligence")]
+            breakers: serde_json::json!({}),
+            dispatch_total: 0,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("orac-sidecar"));
         assert!(json.contains("8133"));
+    }
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn health_response_includes_ralph_fields() {
+        let resp = HealthResponse {
+            status: "healthy",
+            service: "orac-sidecar",
+            port: 8133,
+            sessions: 1,
+            uptime_ticks: 100,
+            ralph_gen: 42,
+            ralph_phase: "Analyze".into(),
+            ralph_fitness: 0.667,
+            ipc_state: "connected".into(),
+            #[cfg(feature = "intelligence")]
+            breakers: serde_json::json!({"pv2": "Closed", "synthex": "Closed"}),
+            dispatch_total: 5,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("ralph_gen"));
+        assert!(json.contains("42"));
+        assert!(json.contains("Analyze"));
+        assert!(json.contains("0.667"));
     }
 
     // ── generate_pane_id ──
@@ -1634,5 +2458,153 @@ mod tests {
         let started = 1_742_600_000_000_u64;
         let ended = 1_742_601_800_000_u64;
         assert_eq!(ended.saturating_sub(started), 1_800_000);
+    }
+
+    // ── IPC state ──
+
+    #[test]
+    fn ipc_state_defaults_disconnected() {
+        let state = OracState::new(PvConfig::default());
+        assert_eq!(state.get_ipc_state(), "disconnected");
+    }
+
+    #[test]
+    fn set_ipc_state_updates() {
+        let state = OracState::new(PvConfig::default());
+        state.set_ipc_state("connected");
+        assert_eq!(state.get_ipc_state(), "connected");
+    }
+
+    #[test]
+    fn set_ipc_state_overwrites() {
+        let state = OracState::new(PvConfig::default());
+        state.set_ipc_state("connecting");
+        state.set_ipc_state("connected");
+        assert_eq!(state.get_ipc_state(), "connected");
+    }
+
+    // ── Emergence data via RALPH ──
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn emergence_detector_accessible_from_orac_state() {
+        let state = OracState::new(PvConfig::default());
+        let detector = state.ralph.emergence();
+        assert_eq!(detector.history_len(), 0);
+        assert_eq!(detector.active_monitor_count(), 0);
+    }
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn emergence_stats_serializable() {
+        let state = OracState::new(PvConfig::default());
+        let detector = state.ralph.emergence();
+        let stats = detector.stats();
+        let json = serde_json::to_value(&serde_json::json!({
+            "total_detected": stats.total_detected,
+            "active_monitors": detector.active_monitor_count(),
+            "history_len": detector.history_len(),
+            "by_type": stats.by_type,
+        }));
+        assert!(json.is_ok());
+        let v = json.unwrap_or_default();
+        assert_eq!(v["total_detected"], 0);
+        assert_eq!(v["history_len"], 0);
+    }
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn emergence_recent_empty_on_fresh_engine() {
+        let state = OracState::new(PvConfig::default());
+        let recent = state.ralph.emergence().recent(5);
+        assert!(recent.is_empty());
+    }
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn emergence_record_serializes_for_field_response() {
+        use crate::m8_evolution::m37_emergence_detector::{
+            EmergenceRecord, EmergenceSeverity, EmergenceType,
+        };
+        let record = EmergenceRecord {
+            id: 1,
+            emergence_type: EmergenceType::BeneficialSync,
+            confidence: 0.95,
+            severity: 0.3,
+            severity_class: EmergenceSeverity::Low,
+            affected_panes: vec!["alpha".into()],
+            description: "Fleet reached r=0.97".into(),
+            detected_at_tick: 42,
+            ttl: 500,
+            recommended_action: None,
+        };
+        let json = serde_json::json!({
+            "type": record.emergence_type.to_string(),
+            "severity": record.severity_class.to_string(),
+            "confidence": record.confidence,
+            "description": record.description,
+            "detected_at_tick": record.detected_at_tick,
+            "ttl": record.ttl,
+        });
+        assert_eq!(json["type"], "beneficial_sync");
+        assert_eq!(json["severity"], "low");
+        assert_eq!(json["confidence"], 0.95);
+        assert_eq!(json["detected_at_tick"], 42);
+    }
+
+    // ── RALPH Prometheus metrics ──
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn ralph_metrics_format_valid_prometheus() {
+        use std::fmt::Write;
+        let state = OracState::new(PvConfig::default());
+        let ralph_state = state.ralph.state();
+        let ralph_stats = state.ralph.stats();
+
+        let mut body = String::new();
+        let _ = write!(
+            body,
+            "orac_ralph_generation {}\norac_ralph_fitness {:.4}\n",
+            ralph_state.generation, ralph_state.current_fitness,
+        );
+        // Prometheus lines: metric_name value\n
+        assert!(body.contains("orac_ralph_generation 0"));
+        assert!(body.contains("orac_ralph_fitness"));
+        // No empty metric names or malformed lines
+        for line in body.lines() {
+            if !line.is_empty() && !line.starts_with('#') {
+                assert!(
+                    line.contains(' '),
+                    "prometheus line must have space between name and value: {line}",
+                );
+            }
+        }
+        // Stats should be zero on fresh engine
+        assert_eq!(ralph_stats.total_proposed, 0);
+        assert_eq!(ralph_stats.total_accepted, 0);
+        assert_eq!(ralph_stats.total_rolled_back, 0);
+    }
+
+    #[cfg(feature = "evolution")]
+    #[test]
+    fn ralph_metrics_mutation_counters_sum() {
+        use crate::m8_evolution::m39_fitness_tensor::TensorValues;
+        let engine = crate::m8_evolution::m36_ralph_engine::RalphEngine::new();
+        let tensor = TensorValues::uniform(0.5);
+
+        // Run through 10 ticks
+        for tick in 0..10 {
+            let _ = engine.tick(&tensor, tick);
+        }
+
+        let stats = engine.stats();
+        // proposed = accepted + rolled_back (skipped are separate)
+        let outcome_total = stats.total_accepted + stats.total_rolled_back;
+        assert!(
+            stats.total_proposed >= outcome_total,
+            "proposed ({}) must >= accepted+rolled_back ({})",
+            stats.total_proposed, outcome_total,
+        );
     }
 }

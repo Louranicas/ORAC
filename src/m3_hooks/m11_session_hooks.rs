@@ -50,14 +50,20 @@ pub async fn handle_session_start(
     .to_string();
     fire_and_forget_post(register_url, register_body);
 
-    // Hydrate from POVM + RM (parallel)
+    // Hydrate from POVM + RM (parallel, consent-gated)
+    let hydration_allowed = state.consent_allows(&pane_id_str, "hydration");
     let povm_url = format!("{}/hydrate", state.povm_url);
     let rm_url = format!("{}/search?q=discovery", state.rm_url);
 
-    let (povm_data, rm_data) = tokio::join!(
-        http_get(&povm_url, 2000),
-        http_get(&rm_url, 2000),
-    );
+    let (povm_data, rm_data) = if hydration_allowed {
+        tokio::join!(
+            http_get(&povm_url, 2000),
+            http_get(&rm_url, 2000),
+        )
+    } else {
+        tracing::info!("Consent: hydration denied for {}", pane_id_str);
+        (None, None)
+    };
 
     let (povm_memories, povm_pathways) = parse_povm_hydration(povm_data.as_deref());
     let rm_count = parse_rm_count(rm_data.as_deref());
@@ -66,10 +72,43 @@ pub async fn handle_session_start(
     state.register_session(session_id, pane_id.clone());
 
     // Register in coupling network for semantic routing
+    // Uses register() to create bidirectional connections, rebuild adjacency
+    // index, and trigger auto_scale_k() — not raw HashMap insert (BUG-L4-001).
     {
         let mut network = state.coupling.write();
-        network.phases.insert(pane_id.clone(), 0.0);
-        network.frequencies.insert(pane_id, 0.1);
+        network.register(pane_id.clone(), 0.0, 0.1);
+    }
+
+    // Register on local blackboard (initial pane_status + agent_card)
+    #[cfg(feature = "persistence")]
+    if let Some(bb) = state.blackboard() {
+        use crate::m1_core::m01_core_types::PaneStatus;
+        use crate::m5_bridges::m26_blackboard::{AgentCard, PaneRecord};
+
+        #[allow(clippy::cast_precision_loss)]
+        let now = super::m10_hook_server::epoch_ms() as f64 / 1000.0;
+
+        let _ = bb.upsert_pane(&PaneRecord {
+            pane_id: pane_id.clone(),
+            status: PaneStatus::Idle,
+            persona: "orac-agent".into(),
+            updated_at: now,
+            phase: 0.0,
+            tasks_completed: 0,
+        });
+
+        let _ = bb.upsert_card(&AgentCard {
+            pane_id,
+            capabilities: vec![
+                "read".into(),
+                "write".into(),
+                "execute".into(),
+                "search".into(),
+            ],
+            domain: "general".into(),
+            model: "claude-opus-4-6".into(),
+            registered_at: now,
+        });
     }
 
     let message = format!(
@@ -90,6 +129,7 @@ pub async fn handle_session_start(
 /// 3. Crystallizes session summary to POVM + RM
 /// 4. Deregisters sphere (creates ghost trace)
 /// 5. Removes session from tracking
+#[allow(clippy::too_many_lines)] // Structured by section: cleanup, crystallize, ghost, deregister
 pub async fn handle_stop(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
@@ -97,8 +137,10 @@ pub async fn handle_stop(
     let session_id = event.session_id.unwrap_or_default();
 
     let tracker = state.remove_session(&session_id);
+    // BUG-L3-006 fix: Use sentinel instead of random pane_id for unknown sessions.
+    // Random IDs created phantom ghost traces that couldn't be correlated.
     let pane_id_str = tracker.as_ref().map_or_else(
-        || generate_pane_id().as_str().to_owned(),
+        || "unknown-session".to_owned(),
         |t| t.pane_id.as_str().to_owned(),
     );
 
@@ -113,28 +155,52 @@ pub async fn handle_stop(
     let status_body = serde_json::json!({"status": "complete"}).to_string();
     fire_and_forget_post(status_url, status_body);
 
-    let r_value = fetch_current_r(&state.pv2_url).await;
-    let povm_url = format!("{}/snapshots", state.povm_url);
-    let povm_body = serde_json::json!({
-        "sphere_id": pane_id_str,
-        "r": r_value,
-        "event": "session_end"
-    })
-    .to_string();
-    fire_and_forget_post(povm_url, povm_body);
+    let r_value = state.field_state.read().field.order.r;
 
-    let rm_put_url = format!("{}/put", state.rm_url);
-    let rm_tsv = format!(
-        "session\t{pane_id_str}\tsession-end\t3600\tsession-end r={r_value}"
-    );
-    tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = ureq::post(&rm_put_url)
-                .timeout(std::time::Duration::from_millis(2000))
-                .send_string(&rm_tsv);
+    // Consent + breaker-gated: POVM snapshot write
+    if state.consent_allows(&pane_id_str, "povm_write") {
+        let povm_url = format!("{}/snapshots", state.povm_url);
+        let povm_body = serde_json::json!({
+            "sphere_id": pane_id_str,
+            "r": r_value,
+            "event": "session_end"
         })
-        .await;
-    });
+        .to_string();
+        #[cfg(feature = "intelligence")]
+        super::m10_hook_server::breaker_guarded_post(&state, "povm", povm_url, povm_body);
+        #[cfg(not(feature = "intelligence"))]
+        fire_and_forget_post(povm_url, povm_body);
+    } else {
+        tracing::info!("Consent: povm_write denied for {}", pane_id_str);
+    }
+
+    // Consent + breaker-gated: RM crystallize
+    if state.consent_allows(&pane_id_str, "rm_write") && state.breaker_allows("rm") {
+        let rm_put_url = format!("{}/put", state.rm_url);
+        let rm_tsv = format!(
+            "session\t{pane_id_str}\tsession-end\t3600\tsession-end r={r_value}"
+        );
+        let rm_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let ok = tokio::task::spawn_blocking(move || {
+                ureq::post(&rm_put_url)
+                    .timeout(std::time::Duration::from_millis(2000))
+                    .send_string(&rm_tsv)
+                    .is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            if ok {
+                rm_state.breaker_success("rm");
+            } else {
+                rm_state.breaker_failure("rm");
+            }
+        });
+    } else if !state.consent_allows(&pane_id_str, "rm_write") {
+        tracing::info!("Consent: rm_write denied for {}", pane_id_str);
+    } else {
+        tracing::debug!("Breaker open for rm, skipping crystallize");
+    }
 
     // 5b. Update blackboard: record failed task (if any), mark Complete
     #[cfg(feature = "persistence")]
@@ -148,13 +214,17 @@ pub async fn handle_stop(
         if let Some(ref t) = tracker {
             if let Some(ref task_id) = t.active_task_id {
                 use crate::m5_bridges::m26_blackboard::TaskRecord;
+                let now_ms = super::m10_hook_server::epoch_ms();
+                #[allow(clippy::cast_precision_loss)]
+                let duration_secs = t.active_task_claimed_ms
+                    .map_or(0.0, |c| now_ms.saturating_sub(c) as f64 / 1000.0);
                 let _ = bb.insert_task(&TaskRecord {
                     task_id: task_id.clone(),
                     pane_id: pid.clone(),
                     description: "session terminated".into(),
                     outcome: "failed".into(),
                     finished_at: now,
-                    duration_secs: 0.0,
+                    duration_secs,
                 });
             }
         }
@@ -166,7 +236,39 @@ pub async fn handle_stop(
         }
     }
 
-    // 6. Deregister sphere (creates ghost trace)
+    // 6. Record ghost trace before deregistration
+    {
+        use super::m10_hook_server::{epoch_ms, OracGhost};
+        use crate::m1_core::m01_core_types::PaneId;
+        let now = epoch_ms();
+        let (total_tools, started_ms, persona) = tracker.as_ref().map_or(
+            (0, now, String::new()),
+            |t| (t.total_tool_calls, t.started_ms, t.persona.clone()),
+        );
+        let final_phase = state
+            .field_state
+            .read()
+            .spheres
+            .get(&PaneId::new(&pane_id_str))
+            .map_or(0.0, |sp| sp.phase);
+        state.add_ghost(OracGhost {
+            sphere_id: pane_id_str.clone(),
+            persona,
+            deregistered_ms: now,
+            final_phase,
+            total_tools,
+            session_duration_ms: now.saturating_sub(started_ms),
+        });
+    }
+
+    // 6b. Deregister from coupling network (BUG-L3-007: prevent unbounded growth)
+    {
+        let pid = crate::m1_core::m01_core_types::PaneId::new(&pane_id_str);
+        let mut network = state.coupling.write();
+        network.deregister(&pid);
+    }
+
+    // 7. Deregister sphere on PV2
     let dereg_url = format!("{}/sphere/{}/deregister", state.pv2_url, pane_id_str);
     fire_and_forget_post(dereg_url, String::new());
 
@@ -193,15 +295,7 @@ fn parse_rm_count(data: Option<&str>) -> usize {
     parsed.as_array().map_or(0, Vec::len)
 }
 
-async fn fetch_current_r(pv2_url: &str) -> f64 {
-    let url = format!("{pv2_url}/health");
-    let data = http_get(&url, 1000).await;
-    data.and_then(|s| {
-        let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-        v.get("r").and_then(serde_json::Value::as_f64)
-    })
-    .unwrap_or(0.0)
-}
+
 
 #[cfg(test)]
 mod tests {

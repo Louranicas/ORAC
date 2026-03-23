@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::m01_core_types::{
     DecisionRecord, FieldAction, FleetMode, OrderParameter, PaneId, PaneSphere, RTrend,
 };
+use super::m04_constants;
 
 // ──────────────────────────────────────────────────────────────
 // Harmonics — sub-cluster analysis
@@ -39,9 +40,8 @@ pub struct Harmonics {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FieldState {
     /// Kuramoto order parameter (synchronization measure).
+    #[serde(alias = "order_parameter")]
     pub order: OrderParameter,
-    /// Alias for `order` — PV2 compat.
-    pub order_parameter: OrderParameter,
     /// Current tick number.
     pub tick: u64,
     /// Current fleet mode based on sphere count.
@@ -69,7 +69,9 @@ impl FieldState {
         let (sin_sum, cos_sum) = spheres.values().fold((0.0_f64, 0.0_f64), |(s, c), sp| {
             (s + sp.phase.sin(), c + sp.phase.cos())
         });
-        let count = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+        // BUG-L1-010: n is always ≤ SPHERE_CAP (200), so cast is lossless
+        #[allow(clippy::cast_precision_loss)]
+        let count = n as f64;
         let r = sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / count;
         let psi = sin_sum.atan2(cos_sum);
 
@@ -80,7 +82,6 @@ impl FieldState {
 
         Self {
             order,
-            order_parameter: order,
             tick,
             fleet_mode: FleetMode::from_count(n),
             r_trend: RTrend::default(),
@@ -170,10 +171,13 @@ pub struct AppState {
     pub r_history: VecDeque<f64>,
     /// Warmup ticks remaining.
     warmup_remaining: u32,
+    /// Consecutive failed PV2 polls (reset to 0 on success).
+    pub consecutive_misses: u32,
 }
 
 /// Default warmup ticks before conductor is active.
-const WARMUP_TICKS: u32 = 10;
+/// Uses the canonical value from `m04_constants`.
+const WARMUP_TICKS: u32 = m04_constants::WARMUP_TICKS;
 
 impl Default for AppState {
     fn default() -> Self {
@@ -189,6 +193,7 @@ impl Default for AppState {
             prev_decision_action: FieldAction::Stable,
             r_history: VecDeque::with_capacity(60),
             warmup_remaining: WARMUP_TICKS,
+            consecutive_misses: 0,
         }
     }
 }
@@ -212,7 +217,51 @@ impl AppState {
         }
         self.r_history.push_back(r);
     }
+
+    /// Update exponential moving averages for divergence and coherence signals.
+    ///
+    /// `divergence` and `coherence` are instantaneous signal values (typically
+    /// derived from `r_target - r` and `r` respectively). The EMA smoothing
+    /// uses `alpha` = 0.2 (matching conductor constants).
+    pub fn update_emas(&mut self, divergence: f64, coherence: f64) {
+        const ALPHA: f64 = 0.2;
+        self.divergence_ema = ALPHA.mul_add(divergence, (1.0 - ALPHA) * self.divergence_ema);
+        self.coherence_ema = ALPHA.mul_add(coherence, (1.0 - ALPHA) * self.coherence_ema);
+    }
+
+    /// Decrement divergence cooldown by one tick (saturating at 0).
+    ///
+    /// Must be called once per tick to allow the conductor to exit
+    /// `Recovering` state after the cooldown period expires.
+    pub fn tick_cooldown(&mut self) {
+        self.divergence_cooldown = self.divergence_cooldown.saturating_sub(1);
+    }
+
+    /// Record a successful PV2 poll (resets miss counter).
+    pub fn record_poll_success(&mut self) {
+        self.consecutive_misses = 0;
+    }
+
+    /// Record a missed PV2 poll (increments miss counter).
+    pub fn record_poll_miss(&mut self) {
+        self.consecutive_misses = self.consecutive_misses.saturating_add(1);
+    }
+
+    /// Whether the cached field state is stale (3+ consecutive missed polls = 15s+).
+    #[must_use]
+    pub const fn is_stale(&self) -> bool {
+        self.consecutive_misses >= STALE_THRESHOLD
+    }
+
+    /// Number of consecutive missed PV2 polls.
+    #[must_use]
+    pub const fn consecutive_misses(&self) -> u32 {
+        self.consecutive_misses
+    }
 }
+
+/// Number of consecutive missed polls before field state is considered stale.
+const STALE_THRESHOLD: u32 = 3;
 
 /// Thread-safe shared application state.
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -236,6 +285,22 @@ mod tests {
         let fs = FieldState::default();
         assert_eq!(fs.tick, 0);
         assert!(fs.recent_decisions.is_empty());
+    }
+
+    #[test]
+    fn field_state_no_duplicate_order_field() {
+        let fs = FieldState::default();
+        // Only `order` exists now — no `order_parameter` divergence hazard
+        assert!(fs.order.r.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn field_state_serde_alias_backward_compat() {
+        // JSON with old "order_parameter" key should deserialize into "order"
+        let json = r#"{"order_parameter":{"r":0.85,"psi":1.2},"tick":42,"fleet_mode":"Solo","r_trend":"Stable","recent_decisions":[],"harmonics":{"clusters":[],"chimera_detected":false,"cluster_count":0}}"#;
+        let fs: FieldState = serde_json::from_str(json).unwrap();
+        assert!((fs.order.r - 0.85).abs() < f64::EPSILON);
+        assert_eq!(fs.tick, 42);
     }
 
     #[test]
@@ -290,5 +355,132 @@ mod tests {
         let state = new_shared_state();
         let guard = state.read();
         assert!(guard.spheres.is_empty());
+    }
+
+    // ── Staleness detection ──
+
+    #[test]
+    fn fresh_state_is_not_stale() {
+        let state = AppState::default();
+        assert!(!state.is_stale());
+        assert_eq!(state.consecutive_misses(), 0);
+    }
+
+    #[test]
+    fn one_miss_is_not_stale() {
+        let mut state = AppState::default();
+        state.record_poll_miss();
+        assert!(!state.is_stale());
+        assert_eq!(state.consecutive_misses(), 1);
+    }
+
+    #[test]
+    fn two_misses_is_not_stale() {
+        let mut state = AppState::default();
+        state.record_poll_miss();
+        state.record_poll_miss();
+        assert!(!state.is_stale());
+        assert_eq!(state.consecutive_misses(), 2);
+    }
+
+    #[test]
+    fn three_misses_is_stale() {
+        let mut state = AppState::default();
+        for _ in 0..3 {
+            state.record_poll_miss();
+        }
+        assert!(state.is_stale());
+        assert_eq!(state.consecutive_misses(), 3);
+    }
+
+    #[test]
+    fn success_resets_miss_counter() {
+        let mut state = AppState::default();
+        state.record_poll_miss();
+        state.record_poll_miss();
+        assert_eq!(state.consecutive_misses(), 2);
+
+        state.record_poll_success();
+        assert_eq!(state.consecutive_misses(), 0);
+        assert!(!state.is_stale());
+    }
+
+    #[test]
+    fn success_after_stale_clears_staleness() {
+        let mut state = AppState::default();
+        for _ in 0..5 {
+            state.record_poll_miss();
+        }
+        assert!(state.is_stale());
+        assert_eq!(state.consecutive_misses(), 5);
+
+        state.record_poll_success();
+        assert!(!state.is_stale());
+        assert_eq!(state.consecutive_misses(), 0);
+    }
+
+    // ── EMA updates ──
+
+    #[test]
+    fn update_emas_from_zero() {
+        let mut state = AppState::default();
+        state.update_emas(1.0, 0.5);
+        // alpha=0.2, so: 0.2*1.0 + 0.8*0.0 = 0.2
+        assert!((state.divergence_ema - 0.2).abs() < 1e-10);
+        // 0.2*0.5 + 0.8*0.0 = 0.1
+        assert!((state.coherence_ema - 0.1).abs() < 1e-10);
+    }
+
+    #[test]
+    fn update_emas_converges() {
+        let mut state = AppState::default();
+        for _ in 0..100 {
+            state.update_emas(1.0, 1.0);
+        }
+        // After many iterations, EMA converges to the signal value
+        assert!((state.divergence_ema - 1.0).abs() < 0.01);
+        assert!((state.coherence_ema - 1.0).abs() < 0.01);
+    }
+
+    // ── Cooldown decrement ──
+
+    #[test]
+    fn tick_cooldown_decrements() {
+        let mut state = AppState::default();
+        state.divergence_cooldown = 3;
+        state.tick_cooldown();
+        assert_eq!(state.divergence_cooldown, 2);
+        state.tick_cooldown();
+        assert_eq!(state.divergence_cooldown, 1);
+        state.tick_cooldown();
+        assert_eq!(state.divergence_cooldown, 0);
+    }
+
+    #[test]
+    fn tick_cooldown_saturates_at_zero() {
+        let mut state = AppState::default();
+        assert_eq!(state.divergence_cooldown, 0);
+        state.tick_cooldown();
+        assert_eq!(state.divergence_cooldown, 0);
+    }
+
+    #[test]
+    fn tick_cooldown_exits_recovering() {
+        let mut state = AppState::default();
+        state.divergence_cooldown = 1;
+        assert!(state.divergence_cooldown > 0);
+        state.tick_cooldown();
+        assert_eq!(state.divergence_cooldown, 0);
+    }
+
+    #[test]
+    fn miss_counter_saturates() {
+        let mut state = AppState::default();
+        for _ in 0..100_000 {
+            state.record_poll_miss();
+        }
+        assert!(state.is_stale());
+        // Should not overflow
+        assert!(state.consecutive_misses() >= 3);
     }
 }

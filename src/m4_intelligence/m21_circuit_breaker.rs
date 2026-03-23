@@ -121,6 +121,8 @@ pub struct PaneBreaker {
     half_open_requests: u32,
     /// Tick at which the circuit was opened.
     opened_at_tick: u64,
+    /// Most recent tick seen via `tick_check` or `record_failure_at` (BUG-L4-002 fallback).
+    last_known_tick: u64,
     /// Total failure count (lifetime, never reset).
     total_failures: u64,
     /// Total success count (lifetime, never reset).
@@ -139,6 +141,7 @@ impl PaneBreaker {
             half_open_successes: 0,
             half_open_requests: 0,
             opened_at_tick: 0,
+            last_known_tick: 0,
             total_failures: 0,
             total_successes: 0,
             config,
@@ -202,39 +205,59 @@ impl PaneBreaker {
     }
 
     /// Record a failed operation.
+    ///
+    /// Uses `last_known_tick` for Open-state timeout tracking. Prefer
+    /// `record_failure_at()` when the current tick is available (BUG-L4-002).
+    ///
+    /// BUG-L4-003: Only increments `consecutive_failures` in Closed/`HalfOpen`
+    /// states (capped at 100). Open-state failures count toward lifetime total
+    /// but do not inflate diagnostics.
+    ///
+    /// BUG-L4-006: Uses `last_known_tick.max(1)` to avoid `opened_at_tick=0`
+    /// which would cause premature `HalfOpen` transition on first `tick_check`.
     pub fn record_failure(&mut self) {
         self.total_failures = self.total_failures.saturating_add(1);
-        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
 
+        // BUG-L4-006: floor at 1 so opened_at_tick is never 0
+        let tick = self.last_known_tick.max(1);
         match self.state {
             BreakerState::Closed => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1).min(100);
                 if self.consecutive_failures >= self.config.failure_threshold {
-                    self.transition_to_open(0); // tick unknown, caller should use tick_check
+                    self.transition_to_open(tick);
                 }
             }
             BreakerState::Open => {
-                // Already open, nothing to do
+                // Already open — do NOT increment consecutive_failures (BUG-L4-003)
             }
             BreakerState::HalfOpen => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1).min(100);
                 // Probe failed — back to Open
-                self.transition_to_open(0);
+                self.transition_to_open(tick);
             }
         }
     }
 
     /// Record a failed operation with the current tick for timeout tracking.
+    ///
+    /// BUG-L4-003: Only increments `consecutive_failures` in Closed/`HalfOpen`
+    /// states (capped at 100).
     pub fn record_failure_at(&mut self, tick: u64) {
+        self.last_known_tick = tick;
         self.total_failures = self.total_failures.saturating_add(1);
-        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
 
         match self.state {
             BreakerState::Closed => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1).min(100);
                 if self.consecutive_failures >= self.config.failure_threshold {
                     self.transition_to_open(tick);
                 }
             }
-            BreakerState::Open => {}
+            BreakerState::Open => {
+                // Do NOT increment consecutive_failures (BUG-L4-003)
+            }
             BreakerState::HalfOpen => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1).min(100);
                 self.transition_to_open(tick);
             }
         }
@@ -245,6 +268,7 @@ impl PaneBreaker {
     /// Call this once per tick. If the breaker is `Open` and the timeout
     /// has elapsed, it transitions to `HalfOpen`.
     pub fn tick_check(&mut self, current_tick: u64) {
+        self.last_known_tick = current_tick;
         if self.state == BreakerState::Open
             && current_tick.saturating_sub(self.opened_at_tick) >= self.config.open_timeout_ticks
         {
@@ -866,5 +890,120 @@ mod tests {
         assert!(b.allows_request());
         assert_eq!(b.total_failures(), 0);
         assert_eq!(b.total_successes(), 0);
+    }
+
+    // ── Bridge isolation (ORAC topology) ──
+
+    #[test]
+    fn orac_bridge_isolation_trip_pv2_others_unaffected() {
+        let mut r = BreakerRegistry::new(config_fast());
+        // Register all 5 ORAC bridges
+        for svc in &["pv2", "synthex", "me", "povm", "rm"] {
+            r.get_or_create(&pid(svc));
+        }
+        assert_eq!(r.len(), 5);
+
+        // Trip pv2 breaker
+        for tick in 0..3 {
+            r.record_failure(&pid("pv2"), tick);
+        }
+        assert!(!r.allows_request(&pid("pv2")));
+
+        // All others must remain closed
+        assert!(r.allows_request(&pid("synthex")));
+        assert!(r.allows_request(&pid("me")));
+        assert!(r.allows_request(&pid("povm")));
+        assert!(r.allows_request(&pid("rm")));
+
+        // State counts: 4 closed, 1 open, 0 half-open
+        let (closed, open, half_open) = r.state_counts();
+        assert_eq!(closed, 4);
+        assert_eq!(open, 1);
+        assert_eq!(half_open, 0);
+    }
+
+    #[test]
+    fn orac_bridge_isolation_trip_two_others_unaffected() {
+        let mut r = BreakerRegistry::new(config_fast());
+        for svc in &["pv2", "synthex", "me", "povm", "rm"] {
+            r.get_or_create(&pid(svc));
+        }
+
+        // Trip synthex and povm
+        for tick in 0..3 {
+            r.record_failure(&pid("synthex"), tick);
+            r.record_failure(&pid("povm"), tick);
+        }
+        assert!(!r.allows_request(&pid("synthex")));
+        assert!(!r.allows_request(&pid("povm")));
+
+        // pv2, me, rm untouched
+        assert!(r.allows_request(&pid("pv2")));
+        assert!(r.allows_request(&pid("me")));
+        assert!(r.allows_request(&pid("rm")));
+
+        let (closed, open, _) = r.state_counts();
+        assert_eq!(closed, 3);
+        assert_eq!(open, 2);
+    }
+
+    #[test]
+    fn orac_bridge_isolation_recovery_independent() {
+        let mut r = BreakerRegistry::new(config_fast());
+        for svc in &["pv2", "synthex", "me", "povm", "rm"] {
+            r.get_or_create(&pid(svc));
+        }
+
+        // Trip all 5
+        for tick in 0..3 {
+            for svc in &["pv2", "synthex", "me", "povm", "rm"] {
+                r.record_failure(&pid(svc), tick);
+            }
+        }
+        let (_, open, _) = r.state_counts();
+        assert_eq!(open, 5);
+
+        // Advance ticks to transition all to HalfOpen
+        r.tick_all(100);
+        let (_, _, half_open) = r.state_counts();
+        assert_eq!(half_open, 5);
+
+        // Recover only pv2 and rm
+        r.record_success(&pid("pv2"));
+        r.record_success(&pid("rm"));
+
+        // pv2 and rm closed, others still half-open
+        assert!(r.allows_request(&pid("pv2")));
+        assert!(r.allows_request(&pid("rm")));
+        let (closed, _, half_open) = r.state_counts();
+        assert_eq!(closed, 2);
+        assert_eq!(half_open, 3);
+    }
+
+    #[test]
+    fn orac_bridge_isolation_successes_dont_cross() {
+        let mut r = BreakerRegistry::new(config_fast());
+        for svc in &["pv2", "synthex"] {
+            r.get_or_create(&pid(svc));
+        }
+
+        // Accumulate 2 failures on pv2 (below threshold of 3)
+        r.record_failure(&pid("pv2"), 0);
+        r.record_failure(&pid("pv2"), 1);
+        assert_eq!(
+            r.get(&pid("pv2")).map(PaneBreaker::consecutive_failures),
+            Some(2)
+        );
+
+        // Success on synthex does NOT reset pv2 failures
+        r.record_success(&pid("synthex"));
+        assert_eq!(
+            r.get(&pid("pv2")).map(PaneBreaker::consecutive_failures),
+            Some(2)
+        );
+        assert_eq!(
+            r.get(&pid("synthex")).map(PaneBreaker::consecutive_failures),
+            Some(0)
+        );
     }
 }

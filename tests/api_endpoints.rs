@@ -218,10 +218,15 @@ mod api_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn field_has_source_field() {
+    async fn field_has_source_and_tick() {
         let (base, handle) = start_test_server().await;
         let body = get_json(&format!("{base}/field")).await;
-        assert_eq!(body["source"], "pv2_proxy");
+        // Source is cache-based (no PV2 running in test)
+        let source = body["source"].as_str().expect("source should be a string");
+        assert!(
+            source.starts_with("cache"),
+            "source should be cache-based, got {source}"
+        );
         assert!(body["tick"].is_number());
         handle.abort();
     }
@@ -235,73 +240,52 @@ mod api_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn field_returns_r_and_sphere_count_from_pv2() {
-        let (pv2_url, pv2_handle) = start_mock_pv2().await;
-        let (base, handle) = start_test_server_with_pv2(&pv2_url).await;
-
+    async fn field_returns_r_and_sphere_count_from_cache() {
+        let (base, handle) = start_test_server().await;
         let body = get_json(&format!("{base}/field")).await;
 
-        assert_eq!(body["source"], "pv2_proxy");
-
-        let r = body["r"].as_f64().expect("r should be a number");
-        assert!(
-            (r - 0.9276).abs() < 0.001,
-            "r should be ~0.9276, got {r}"
-        );
-
-        let sphere_count = body["sphere_count"]
-            .as_u64()
-            .expect("sphere_count should be a number");
-        assert_eq!(sphere_count, 12);
+        // Cache defaults: r=0.0, sphere_count=0 (poller not running in tests)
+        assert!(body["r"].is_number(), "r should always be present");
+        assert!(body["sphere_count"].is_number(), "sphere_count should always be present");
+        assert!(body["pv2_tick"].is_number(), "pv2_tick should always be present");
+        assert!(body.get("stale").is_some(), "stale flag should be present");
 
         handle.abort();
-        pv2_handle.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn field_returns_k_and_pv2_tick() {
+    async fn field_enriched_with_k_from_live_pv2() {
         let (pv2_url, pv2_handle) = start_mock_pv2().await;
         let (base, handle) = start_test_server_with_pv2(&pv2_url).await;
 
         let body = get_json(&format!("{base}/field")).await;
 
+        // k/k_mod are enriched from live PV2 even though r comes from cache
         let k = body["k"].as_f64().expect("k should be a number");
         assert!((k - 1.5).abs() < 0.001, "k should be 1.5, got {k}");
 
-        let pv2_tick = body["pv2_tick"].as_u64().expect("pv2_tick should be a number");
-        assert_eq!(pv2_tick, 4567);
+        assert_eq!(body["source"], "cache_enriched");
 
         handle.abort();
         pv2_handle.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn field_returns_spheres_array_from_pv2() {
-        let (pv2_url, pv2_handle) = start_mock_pv2().await;
-        let (base, handle) = start_test_server_with_pv2(&pv2_url).await;
-
-        let body = get_json(&format!("{base}/field")).await;
-
-        let spheres = body["spheres"].as_array().expect("spheres should be an array");
-        assert_eq!(spheres.len(), 2);
-        assert_eq!(spheres[0]["id"], "sphere-1");
-
-        handle.abort();
-        pv2_handle.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn field_graceful_when_pv2_unreachable() {
-        // PV2 URL points to a port nobody is listening on
+    async fn field_falls_back_to_cache_when_pv2_down() {
         let (base, handle) = start_test_server_with_pv2("http://127.0.0.1:19999").await;
 
         let body = get_json(&format!("{base}/field")).await;
 
-        // Must still return a valid JSON with source and tick
-        assert_eq!(body["source"], "pv2_proxy");
-        assert!(body["tick"].is_number());
-        // r and sphere_count should be absent (not proxied)
-        assert!(body.get("r").is_none() || body["r"].is_null());
+        // Cache-only response (no k/k_mod enrichment)
+        let source = body["source"].as_str().expect("source");
+        assert!(
+            source.starts_with("cache"),
+            "source should be cache-based, got {source}"
+        );
+        assert!(body["r"].is_number());
+        assert!(body["sphere_count"].is_number());
+        // k/k_mod absent when PV2 is down
+        assert!(body.get("k").is_none() || body["k"].is_null());
 
         handle.abort();
     }

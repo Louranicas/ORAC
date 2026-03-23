@@ -16,13 +16,11 @@
 //! - Agent name: `"orac-sidecar"` (not `"pane-vortex"`)
 //! - Content-Type: `text/tab-separated-values` (NEVER JSON)
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
-
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+#[allow(unused_imports)] // extract_body used by tests via `use super::*;`
+use super::http_helpers::{extract_body, raw_http_get, raw_http_post_tsv};
 use crate::m1_core::m02_error_handling::{PvError, PvResult};
 use crate::m1_core::m05_traits::Bridgeable;
 
@@ -47,12 +45,6 @@ const SEARCH_PATH: &str = "/search";
 
 /// Default poll interval in ticks (for reading back).
 const DEFAULT_POLL_INTERVAL: u64 = 30;
-
-/// TCP connection timeout (milliseconds).
-const TCP_TIMEOUT_MS: u64 = 2000;
-
-/// Maximum response body size (bytes).
-const MAX_RESPONSE_SIZE: usize = 32768;
 
 /// Tab character for TSV formatting.
 const TAB: char = '\t';
@@ -469,116 +461,7 @@ fn urlencoded(s: &str) -> String {
 /// Hex character lookup table.
 const HEX_CHARS: [u8; 16] = *b"0123456789ABCDEF";
 
-// ──────────────────────────────────────────────────────────────
-// Raw TCP HTTP helpers
-// ──────────────────────────────────────────────────────────────
-
-/// Send a raw HTTP GET request over TCP and return the response body.
-///
-/// # Errors
-/// Returns `PvError::BridgeUnreachable` if the connection or I/O fails.
-/// Returns `PvError::BridgeParse` if no HTTP body separator is found.
-fn raw_http_get(addr: &str, path: &str, service: &str) -> PvResult<String> {
-    let timeout = Duration::from_millis(TCP_TIMEOUT_MS);
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse().map_err(|_| PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        })?,
-        timeout,
-    )
-    .map_err(|_| PvError::BridgeUnreachable {
-        service: service.to_owned(),
-        url: addr.to_owned(),
-    })?;
-
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|_| PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        })?;
-
-    let host = addr.split(':').next().unwrap_or("localhost");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).map_err(|_| {
-        PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        }
-    })?;
-
-    let mut buf = vec![0u8; MAX_RESPONSE_SIZE];
-    let mut total = 0;
-    loop {
-        match stream.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                if total >= MAX_RESPONSE_SIZE {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
-            Err(_) => {
-                return Err(PvError::BridgeUnreachable {
-                    service: service.to_owned(),
-                    url: addr.to_owned(),
-                });
-            }
-        }
-    }
-
-    let response = String::from_utf8_lossy(&buf[..total]);
-    extract_body(&response).ok_or_else(|| PvError::BridgeParse {
-        service: service.to_owned(),
-        reason: "no body in HTTP response".to_owned(),
-    })
-}
-
-/// Send a raw HTTP POST request with TSV content type (fire-and-forget).
-///
-/// # Errors
-/// Returns `PvError::BridgeUnreachable` if the connection or I/O fails.
-fn raw_http_post_tsv(addr: &str, path: &str, tsv: &str, service: &str) -> PvResult<()> {
-    let timeout = Duration::from_millis(TCP_TIMEOUT_MS);
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse().map_err(|_| PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        })?,
-        timeout,
-    )
-    .map_err(|_| PvError::BridgeUnreachable {
-        service: service.to_owned(),
-        url: addr.to_owned(),
-    })?;
-
-    let host = addr.split(':').next().unwrap_or("localhost");
-    let body = tsv.as_bytes();
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nContent-Type: text/tab-separated-values\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(request.as_bytes()).map_err(|_| {
-        PvError::BridgeUnreachable {
-            service: service.to_owned(),
-            url: addr.to_owned(),
-        }
-    })?;
-    stream.write_all(body).map_err(|_| PvError::BridgeUnreachable {
-        service: service.to_owned(),
-        url: addr.to_owned(),
-    })?;
-
-    Ok(())
-}
-
-/// Extract body from a raw HTTP response.
-fn extract_body(raw: &str) -> Option<String> {
-    raw.find("\r\n\r\n").map(|pos| raw[pos + 4..].to_owned())
-}
+// HTTP helpers now in super::http_helpers (BUG-042 fix)
 
 // ──────────────────────────────────────────────────────────────
 // Tests

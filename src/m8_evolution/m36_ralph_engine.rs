@@ -329,6 +329,13 @@ impl RalphEngine {
     /// Creates a new `RalphEngine` with the given configuration.
     #[must_use]
     pub fn with_config(config: RalphEngineConfig) -> Self {
+        let selector = MutationSelector::new();
+
+        // BUG-041 fix: Register production-relevant mutable parameters.
+        // Without these, RALPH's mutation selector has an empty pool and
+        // skips every generation (AllOnTarget / NoParameters).
+        Self::register_production_params(&selector);
+
         Self {
             phase: RwLock::new(RalphPhase::Recognize),
             generation: RwLock::new(0),
@@ -342,9 +349,29 @@ impl RalphEngine {
             fitness: FitnessTensor::new(),
             emergence: EmergenceDetector::new(),
             correlation: CorrelationEngine::new(),
-            selector: MutationSelector::new(),
+            selector,
             config,
             stats: RwLock::new(RalphStats::default()),
+        }
+    }
+
+    /// Register the standard set of mutable parameters for ORAC RALPH.
+    ///
+    /// These correspond to real system knobs that RALPH can tune:
+    /// coupling strength, Hebbian LTP rate, tick interval, r target, and decay.
+    fn register_production_params(selector: &MutationSelector) {
+        use crate::m8_evolution::m40_mutation_selector::MutableParameter;
+        let params = [
+            MutableParameter::new("k_mod", 1.0, 0.01, 1.5, 0.7, "Coupling strength modifier"),
+            MutableParameter::new("hebbian_ltp", 0.01, 0.001, 0.1, 0.03, "Hebbian LTP learning rate"),
+            MutableParameter::new("tick_interval", 5.0, 1.0, 30.0, 5.0, "RALPH tick interval (seconds)"),
+            MutableParameter::new("r_target", 0.93, 0.5, 1.0, 0.80, "Target field coherence (r)"),
+            MutableParameter::new("decay_rate", 0.995, 0.98, 1.0, 0.99, "Coupling weight decay per step"),
+        ];
+        for p in params {
+            if let Err(e) = selector.register_parameter(p) {
+                tracing::warn!("Failed to register RALPH parameter: {e}");
+            }
         }
     }
 
@@ -460,6 +487,15 @@ impl RalphEngine {
 
         // Evaluate fitness
         self.fitness.evaluate(tensor, tick, Some(generation))?;
+
+        // Track peak fitness (BUG-042: was only updated in Harvest, unreachable
+        // when all mutations are skipped — now updated every cycle)
+        if let Some(current) = self.fitness.current_fitness() {
+            let mut stats = self.stats.write();
+            if current > stats.peak_fitness {
+                stats.peak_fitness = current;
+            }
+        }
 
         // Tick emergence decay
         self.emergence.tick_decay();
@@ -598,10 +634,19 @@ impl RalphEngine {
                 self.rollback(&active_mut.snapshot);
                 self.stats.write().total_rolled_back += 1;
                 MutationStatus::RolledBack
-            } else {
-                tracing::debug!(param = %param, delta, "mutation neutral-accepted");
+            } else if delta >= 0.0 {
+                // BUG-039 fix: only accept non-negative deltas in neutral zone.
+                // Previously, mutations with delta -0.005 to -0.009 were silently
+                // accepted, causing fitness to degrade 0.667→0.427 over 1000 gens.
+                tracing::debug!(param = %param, delta, "mutation neutral-accepted (non-negative)");
                 self.stats.write().total_accepted += 1;
                 MutationStatus::Accepted
+            } else {
+                // Negative delta in neutral zone → rollback to prevent drift
+                tracing::debug!(param = %param, delta, "mutation neutral-rejected (negative delta)");
+                self.rollback(&active_mut.snapshot);
+                self.stats.write().total_rolled_back += 1;
+                MutationStatus::RolledBack
             };
 
             // Update mutation history
@@ -713,7 +758,12 @@ mod tests {
     use crate::m8_evolution::m40_mutation_selector::MutableParameter;
 
     fn make_engine() -> RalphEngine {
-        RalphEngine::new()
+        // Use verification_ticks=0 for tests so cycles complete immediately.
+        // Production default is 10 (waits 10 ticks before harvesting).
+        RalphEngine::with_config(RalphEngineConfig {
+            verification_ticks: 0,
+            ..Default::default()
+        })
     }
 
     fn register_params(engine: &RalphEngine) {
@@ -791,7 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn full_cycle_without_params() {
+    fn full_cycle_with_production_params() {
+        // BUG-041 fix: production params now registered by default.
+        // Cycle still completes in 5 ticks — Propose may generate a mutation.
         let engine = make_engine();
         let tensor = make_tensor(0.5);
 
@@ -807,7 +859,7 @@ mod tests {
         engine.tick(&tensor, 3).unwrap();
         assert_eq!(engine.state().phase, RalphPhase::Propose);
 
-        // Propose (no params → skip) → Harvest
+        // Propose (has params → may propose or skip) → Harvest
         engine.tick(&tensor, 4).unwrap();
         assert_eq!(engine.state().phase, RalphPhase::Harvest);
 
@@ -986,7 +1038,8 @@ mod tests {
     #[test]
     fn selector_accessible() {
         let engine = make_engine();
-        assert_eq!(engine.selector().parameter_count(), 0);
+        // BUG-041 fix: production params now registered by default
+        assert_eq!(engine.selector().parameter_count(), 5);
     }
 
     #[test]

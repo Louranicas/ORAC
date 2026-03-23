@@ -109,9 +109,11 @@ pub fn tick_once(
     state.field = field_state.clone();
     timings.field_state_ms = p2_start.elapsed().as_secs_f64() * 1000.0;
 
-    // ── Phase 3: Conductor advisory decision ──
+    // ── Phase 3: Conductor advisory decision + state updates ──
+    // Uses decide_and_update to also decrement divergence_cooldown,
+    // update EMAs, and write prev_decision_action (BUG-L1-003 fix).
     let p3_start = Instant::now();
-    let decision = conductor.decide(state);
+    let decision = conductor.decide_and_update(state);
     timings.conductor_ms = p3_start.elapsed().as_secs_f64() * 1000.0;
 
     // ── Phase 4: Hebbian STDP (placeholder) ──

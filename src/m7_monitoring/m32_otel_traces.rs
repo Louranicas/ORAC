@@ -26,6 +26,8 @@ use std::time::{Duration, SystemTime};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::m1_core::m01_core_types::now_secs;
+
 use crate::m1_core::m01_core_types::{PaneId, TaskId};
 use crate::m1_core::m02_error_handling::{PvError, PvResult};
 
@@ -777,13 +779,6 @@ pub struct TraceStoreSummary {
 // ──────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────
-
-/// Current time as Unix seconds with fractional.
-fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-}
 
 // ──────────────────────────────────────────────────────────────
 // Tests

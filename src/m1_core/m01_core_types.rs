@@ -384,60 +384,6 @@ pub struct SphereFieldContext {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Ghost trace (departed sphere memory)
-// ──────────────────────────────────────────────────────────────
-
-/// Lightweight trace of a deregistered sphere.
-///
-/// Preserves identity and contribution record after departure.
-/// Ghost traces honour the sphere's existence — "remembering those who leave."
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GhostTrace {
-    /// Sphere ID at time of departure.
-    pub id: PaneId,
-    /// Persona string.
-    pub persona: String,
-    /// Tick at which the sphere was deregistered.
-    pub deregistered_at: u64,
-    /// Total step count during the sphere's lifetime.
-    pub total_steps_lived: u64,
-    /// Number of memories created.
-    pub memory_count: usize,
-    /// Most-used tool names.
-    pub top_tools: Vec<String>,
-    /// Phase at the moment of departure.
-    pub phase_at_departure: f64,
-    /// Receptivity at departure.
-    pub receptivity: f64,
-    /// Work signature at departure.
-    pub work_signature: WorkSignature,
-    /// Strongest coupling neighbors and weights.
-    pub strongest_neighbors: Vec<(String, f64)>,
-}
-
-// ──────────────────────────────────────────────────────────────
-// Inbox message (pending inter-sphere communication)
-// ──────────────────────────────────────────────────────────────
-
-/// A message waiting for sphere acknowledgement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxMessage {
-    /// Message ID (unique within the sphere).
-    pub id: u64,
-    /// Sender sphere ID.
-    pub from: String,
-    /// Message content.
-    pub content: String,
-    /// Unix timestamp when received.
-    pub received_at: f64,
-    /// Whether the sphere has acknowledged this message.
-    pub acknowledged: bool,
-}
-
-/// Maximum inbox size (FIFO eviction beyond this).
-pub const INBOX_MAX: usize = 50;
-
-// ──────────────────────────────────────────────────────────────
 // Order parameter
 // ──────────────────────────────────────────────────────────────
 
@@ -492,7 +438,7 @@ pub struct DecisionRecord {
 }
 
 /// Recommended action based on current field state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FieldAction {
     /// Field is stable — no intervention needed.
     #[default]
@@ -538,120 +484,6 @@ pub enum RTrend {
     /// r is approximately constant.
     #[default]
     Stable,
-}
-
-// ──────────────────────────────────────────────────────────────
-// Bridge adjustment tracking
-// ──────────────────────────────────────────────────────────────
-
-/// Tracks the most recent bridge adjustment values.
-#[derive(Debug, Clone, Default)]
-pub struct BridgeAdjustments {
-    /// SYNTHEX thermal adjustment.
-    pub synthex_adj: f64,
-    /// SAN-K7 nexus adjustment.
-    pub nexus_adj: f64,
-    /// Maintenance Engine adjustment.
-    pub me_adj: f64,
-    /// Combined multiplicative effect of all bridges.
-    pub combined_effect: f64,
-    /// Tick at which these values were last updated.
-    pub updated_at: u64,
-}
-
-/// Per-bridge staleness flags packed into a `u8` bitfield.
-///
-/// Each bit indicates whether the corresponding bridge's last poll result
-/// has exceeded its configured interval. Used by the conductor to decide
-/// whether to trust cached adjustments.
-///
-/// Bit layout: `SYNTHEX | NEXUS | POVM | RM | VMS | ME` (bits 0--5).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BridgeStaleness(u8);
-
-impl BridgeStaleness {
-    /// Bit mask for the SYNTHEX bridge.
-    pub const SYNTHEX: u8 = 1 << 0;
-    /// Bit mask for the Nexus bridge.
-    pub const NEXUS: u8 = 1 << 1;
-    /// Bit mask for the POVM bridge.
-    pub const POVM: u8 = 1 << 2;
-    /// Bit mask for the Reasoning Memory bridge.
-    pub const RM: u8 = 1 << 3;
-    /// Bit mask for the Vortex Memory System bridge.
-    pub const VMS: u8 = 1 << 4;
-    /// Bit mask for the Maintenance Engine bridge.
-    pub const ME: u8 = 1 << 5;
-
-    /// Create a new empty (all-fresh) staleness set.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    /// Set a bridge as stale.
-    pub fn set_stale(&mut self, mask: u8) {
-        self.0 |= mask;
-    }
-
-    /// Clear a bridge's stale flag.
-    pub fn set_fresh(&mut self, mask: u8) {
-        self.0 &= !mask;
-    }
-
-    /// Check whether a specific bridge is stale.
-    #[must_use]
-    pub const fn is_stale(self, mask: u8) -> bool {
-        self.0 & mask != 0
-    }
-
-    /// Returns `true` if any bridge data is stale.
-    #[must_use]
-    pub const fn any_stale(self) -> bool {
-        self.0 != 0
-    }
-
-    /// Returns the number of stale bridges.
-    #[must_use]
-    pub const fn stale_count(self) -> u32 {
-        self.0.count_ones()
-    }
-
-    /// Whether the SYNTHEX bridge data is stale.
-    #[must_use]
-    pub const fn synthex_stale(self) -> bool {
-        self.is_stale(Self::SYNTHEX)
-    }
-
-    /// Whether the Nexus bridge data is stale.
-    #[must_use]
-    pub const fn nexus_stale(self) -> bool {
-        self.is_stale(Self::NEXUS)
-    }
-
-    /// Whether the POVM bridge data is stale.
-    #[must_use]
-    pub const fn povm_stale(self) -> bool {
-        self.is_stale(Self::POVM)
-    }
-
-    /// Whether the Reasoning Memory bridge data is stale.
-    #[must_use]
-    pub const fn rm_stale(self) -> bool {
-        self.is_stale(Self::RM)
-    }
-
-    /// Whether the Vortex Memory System bridge data is stale.
-    #[must_use]
-    pub const fn vms_stale(self) -> bool {
-        self.is_stale(Self::VMS)
-    }
-
-    /// Whether the Maintenance Engine bridge data is stale.
-    #[must_use]
-    pub const fn me_stale(self) -> bool {
-        self.is_stale(Self::ME)
-    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -717,9 +549,16 @@ impl fmt::Display for FleetMode {
 // Utility
 // ──────────────────────────────────────────────────────────────
 
-/// Current time as seconds since UNIX epoch.
+/// Current wall-clock time as seconds since UNIX epoch.
 ///
-/// Returns `0.0` if the system clock is unavailable (e.g. before epoch --
+/// # `SystemTime` Exception
+///
+/// This is the **only** permitted `SystemTime` usage in ORAC. It exists because
+/// timestamps in bus frames, task records, and bridge payloads must be absolute
+/// wall-clock values (not monotonic durations). All internal tick-counting and
+/// cooldown tracking uses `u64` tick counters instead.
+///
+/// Returns `0.0` if the system clock is unavailable (e.g. before epoch —
 /// should never happen in practice).
 #[must_use]
 pub fn now_secs() -> f64 {
@@ -769,15 +608,14 @@ pub fn semantic_phase_region(tool_name: &str) -> f64 {
             TAU * 0.75
         }
         _ => {
-            // Hash remaining tool names into [0, 2π)
-            // Use upper 32 bits for lossless f64 conversion
-            let h: u64 = tool_name
+            // Hash remaining tool names into [0, 2π) using standard FNV-1a 32-bit
+            // (BUG-L1-007: was non-standard FNV prime, incompatible with PV2)
+            let h: u32 = tool_name
                 .bytes()
-                .fold(0x517c_c1b7_2722_0a95_u64, |acc, b| {
-                    acc.wrapping_mul(0x0100_0000_01b3).wrapping_add(u64::from(b))
+                .fold(0x811c_9dc5_u32, |acc, b| {
+                    (acc ^ u32::from(b)).wrapping_mul(0x0100_0193)
                 });
-            let h32 = (h >> 32) as u32;
-            (f64::from(h32) / f64::from(u32::MAX)) * TAU
+            (f64::from(h) / f64::from(u32::MAX)) * TAU
         }
     };
     base.rem_euclid(TAU)
@@ -793,6 +631,7 @@ pub fn semantic_phase_region(tool_name: &str) -> f64 {
 /// adapted from PV2's `PaneSphere`. Contains only the fields that
 /// the sidecar's intelligence and coordination layers need.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaneSphere {
     /// Unique identifier for this sphere.
     pub id: PaneId,
@@ -1220,76 +1059,6 @@ mod tests {
         let r = semantic_phase_region("Read");
         let w = semantic_phase_region("Write");
         assert!((r - w).abs() > 0.1);
-    }
-
-    // ── GhostTrace ──
-
-    #[test]
-    fn ghost_trace_creation() {
-        let ghost = GhostTrace {
-            id: PaneId::new("departed"),
-            persona: "explorer".into(),
-            deregistered_at: 100,
-            total_steps_lived: 50,
-            memory_count: 10,
-            top_tools: vec!["Read".into()],
-            phase_at_departure: 1.5,
-            receptivity: 0.8,
-            work_signature: WorkSignature::default(),
-            strongest_neighbors: vec![("peer".into(), 0.9)],
-        };
-        assert_eq!(ghost.id.as_str(), "departed");
-        assert_eq!(ghost.memory_count, 10);
-    }
-
-    // ── InboxMessage ──
-
-    #[test]
-    fn inbox_message_creation() {
-        let msg = InboxMessage {
-            id: 1,
-            from: "peer".into(),
-            content: "hello".into(),
-            received_at: now_secs(),
-            acknowledged: false,
-        };
-        assert!(!msg.acknowledged);
-    }
-
-    // ── BridgeAdjustments ──
-
-    #[test]
-    fn bridge_adjustments_default() {
-        let ba = BridgeAdjustments::default();
-        assert_relative_eq!(ba.combined_effect, 0.0);
-    }
-
-    // ── BridgeStaleness ──
-
-    #[test]
-    fn bridge_staleness_default_all_fresh() {
-        let bs = BridgeStaleness::default();
-        assert!(!bs.synthex_stale());
-        assert!(!bs.nexus_stale());
-        assert!(!bs.me_stale());
-        assert!(!bs.any_stale());
-        assert_eq!(bs.stale_count(), 0);
-    }
-
-    #[test]
-    fn bridge_staleness_set_and_clear() {
-        let mut bs = BridgeStaleness::new();
-        bs.set_stale(BridgeStaleness::SYNTHEX);
-        bs.set_stale(BridgeStaleness::ME);
-        assert!(bs.synthex_stale());
-        assert!(bs.me_stale());
-        assert!(!bs.nexus_stale());
-        assert!(bs.any_stale());
-        assert_eq!(bs.stale_count(), 2);
-
-        bs.set_fresh(BridgeStaleness::SYNTHEX);
-        assert!(!bs.synthex_stale());
-        assert_eq!(bs.stale_count(), 1);
     }
 
     // ── now_secs ──

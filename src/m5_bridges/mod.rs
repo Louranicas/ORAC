@@ -26,6 +26,8 @@
 //! - Depends on: `m1_core` (types, traits)
 //! - Prerequisite: `devenv start` before bridge tests
 
+/// Shared raw TCP HTTP helpers (BUG-042: extracted from M22-M25)
+pub mod http_helpers;
 /// SYNTHEX bridge — thermal read + Hebbian writeback (adapt M22)
 pub mod m22_synthex_bridge;
 /// ME bridge — fitness signal read + frozen detection (adapt M24)

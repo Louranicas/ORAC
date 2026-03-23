@@ -5,13 +5,20 @@
 
 use std::sync::Arc;
 
+use orac_sidecar::m1_core::m01_core_types::PaneId;
 use orac_sidecar::m1_core::m03_config::PvConfig;
+use orac_sidecar::m2_wire::m07_ipc_client::IpcClient;
+use orac_sidecar::m2_wire::m08_bus_types::BusFrame;
 
 #[cfg(feature = "api")]
 use orac_sidecar::m3_hooks::m10_hook_server::{build_router, spawn_field_poller, OracState};
 
 #[cfg(feature = "evolution")]
-use orac_sidecar::m8_evolution::m39_fitness_tensor::TensorValues;
+use orac_sidecar::m8_evolution::m39_fitness_tensor::{FitnessDimension, TensorValues};
+
+/// Maximum length of r/K history buffers for emergence detection.
+#[cfg(feature = "evolution")]
+const EMERGENCE_HISTORY_CAP: usize = 100;
 
 #[tokio::main]
 async fn main() {
@@ -40,6 +47,9 @@ async fn main() {
 
         // Spawn field state poller (non-blocking, updates SharedState from PV2)
         spawn_field_poller(Arc::clone(&state));
+
+        // Spawn IPC client connection to PV2 bus (BUG-041 fix)
+        spawn_ipc_listener(Arc::clone(&state));
 
         // Shutdown signal: shared between Axum and RALPH
         #[cfg(feature = "evolution")]
@@ -99,36 +109,142 @@ async fn main() {
     tracing::info!("ORAC sidecar shutting down");
 }
 
+/// Spawn the IPC client as a background task (BUG-041 fix).
+///
+/// Connects to the PV2 bus via Unix socket and subscribes to `field.*` and
+/// `sphere.*` events. Updates `OracState.ipc_state` on connect/disconnect.
+/// Runs indefinitely with automatic reconnection on failure.
+#[cfg(feature = "api")]
+fn spawn_ipc_listener(state: Arc<OracState>) {
+    tokio::spawn(async move {
+        // Brief delay to let Axum bind first
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let mut client = IpcClient::new(PaneId::new("orac-sidecar"));
+
+        loop {
+            // Connect with exponential backoff
+            match client.connect_with_backoff().await {
+                Ok(attempts) => {
+                    tracing::info!(attempts, "IPC client connected to PV2 bus");
+                    *state.ipc_state.write() = "connected".into();
+                }
+                Err(e) => {
+                    tracing::warn!("IPC connect failed: {e} — retrying in 30s");
+                    *state.ipc_state.write() = format!("failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+            }
+
+            // Subscribe to field and sphere events
+            let patterns = vec!["field.*".into(), "sphere.*".into()];
+            match client.subscribe(&patterns).await {
+                Ok(count) => {
+                    tracing::info!(count, "IPC subscribed to field.* + sphere.*");
+                    *state.ipc_state.write() = "subscribed".into();
+                }
+                Err(e) => {
+                    tracing::warn!("IPC subscribe failed: {e} — reconnecting");
+                    *state.ipc_state.write() = format!("subscribe_failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+
+            // Event receive loop
+            loop {
+                match client.recv_frame().await {
+                    Ok(BusFrame::Event { event }) => {
+                        tracing::debug!(event_type = ?event, "IPC event received");
+                        // Update field state cache from bus events when available
+                    }
+                    Ok(_frame) => {
+                        // Non-event frames (ack, welcome, etc.) — ignore
+                    }
+                    Err(e) => {
+                        tracing::warn!("IPC recv error: {e} — reconnecting");
+                        *state.ipc_state.write() = "disconnected".into();
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        break; // Break inner loop to reconnect
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Feed field state observations to the emergence detector (BUG-040 fix).
+///
+/// Samples r and K from the cached field state and runs 3 detectors:
+/// 1. Coherence lock (r > 0.998 sustained)
+/// 2. Coupling runaway (K rising without r improvement)
+/// 3. Hebbian saturation (>80% weights at floor/ceiling)
+#[cfg(feature = "evolution")]
+fn feed_emergence_observations(
+    state: &OracState,
+    tick: u64,
+    r_history: &mut Vec<f64>,
+    k_history: &mut Vec<f64>,
+) {
+    // Sample current r from cached field state
+    let r = state.field_state.read().field.order.r;
+    r_history.push(r);
+    if r_history.len() > EMERGENCE_HISTORY_CAP {
+        r_history.remove(0);
+    }
+
+    // Sample effective K from coupling network (K * k_modulation)
+    let (k_eff, weights) = {
+        let network = state.coupling.read();
+        let k = network.k * network.k_modulation;
+        let w: Vec<f64> = network.connections.iter().map(|c| c.weight).collect();
+        (k, w)
+    };
+    k_history.push(k_eff);
+    if k_history.len() > EMERGENCE_HISTORY_CAP {
+        k_history.remove(0);
+    }
+
+    let detector = state.ralph.emergence();
+
+    // 1. Coherence lock detection
+    if let Err(e) = detector.detect_coherence_lock(r_history, tick) {
+        tracing::debug!("Emergence coherence_lock check error: {e}");
+    }
+
+    // 2. Coupling runaway detection
+    if let Err(e) = detector.detect_coupling_runaway(k_history, r_history, tick) {
+        tracing::debug!("Emergence coupling_runaway check error: {e}");
+    }
+
+    // 3. Hebbian saturation detection (every 12 ticks to reduce overhead)
+    if tick % 12 == 0 && !weights.is_empty() {
+        if let Err(e) = detector.detect_hebbian_saturation(&weights, 0.01, 0.99, tick) {
+            tracing::debug!("Emergence hebbian_saturation check error: {e}");
+        }
+    }
+}
+
 /// Build a 12D fitness tensor from current ORAC state.
 ///
 /// Populates dimensions from live data where available,
 /// uses calibrated placeholders for dimensions not yet wired.
 #[cfg(feature = "evolution")]
 fn build_tensor_from_state(state: &OracState) -> TensorValues {
-    let field = state.field_state.read();
-    // Session count is always small (max ~12 panes), safe to convert
+    // collect_tensor reads from blackboard (D3 task_throughput, D4 error_rate,
+    // D9 fleet_utilization), field_state (D1 field_coherence), and consents
+    // (D11 consent_compliance). Remaining dimensions default to 0.5 (neutral).
+    #[cfg(feature = "evolution")]
+    let mut tensor = state.collect_tensor();
+    #[cfg(not(feature = "evolution"))]
+    let mut tensor = TensorValues::uniform(0.5);
+
+    // D0: coordination_quality — session count / 9 fleet panes
     let session_count: f64 = f64::from(u32::try_from(state.session_count()).unwrap_or(0));
-    let coordination = (session_count / 9.0).min(1.0);
-    let r = field.field.order.r;
+    tensor.set(FitnessDimension::CoordinationQuality, (session_count / 9.0).min(1.0));
 
-    let mut vals = [0.0_f64; 12];
-    vals[0] = coordination;  // coordination_quality
-    vals[1] = r;             // field_coherence
-    vals[2] = 1.0;           // dispatch_accuracy (placeholder)
-    vals[3] = 0.75;          // bridge_health (placeholder)
-    vals[4] = 1.0;           // consent_compliance (placeholder)
-    vals[5] = 0.5;           // learning_rate (placeholder)
-    vals[6] = 0.8;           // emergence_stability (placeholder)
-    vals[7] = 0.7;           // resource_efficiency (placeholder)
-    vals[8] = 0.9;           // communication_fidelity (placeholder)
-    vals[9] = 0.5;           // adaptation_speed (placeholder)
-    vals[10] = 0.6;          // diversity_index (placeholder)
-
-    // Dim 11: overall_fitness = mean of dims 0-10
-    let sum: f64 = vals[..11].iter().sum();
-    vals[11] = sum / 11.0;
-
-    TensorValues { values: vals }
+    tensor
 }
 
 /// Spawn the RALPH evolution tick loop as a background tokio task.
@@ -147,10 +263,18 @@ fn spawn_ralph_loop(
 
         tracing::info!("RALPH evolution loop started (5s interval)");
 
+        let mut r_history: Vec<f64> = Vec::with_capacity(EMERGENCE_HISTORY_CAP);
+        let mut k_history: Vec<f64> = Vec::with_capacity(EMERGENCE_HISTORY_CAP);
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let tick = state.increment_tick();
+
+                    // Advance circuit breaker FSMs (Open→HalfOpen after timeout)
+                    #[cfg(feature = "intelligence")]
+                    state.breaker_tick();
+
                     let tensor = build_tensor_from_state(&state);
 
                     match state.ralph.tick(&tensor, tick) {
@@ -169,6 +293,18 @@ fn spawn_ralph_loop(
                             tracing::warn!("RALPH tick error: {e}");
                         }
                     }
+
+                    // BUG-043 fix: Record a trace span for each RALPH tick
+                    #[cfg(feature = "monitoring")]
+                    {
+                        use orac_sidecar::m7_monitoring::m32_otel_traces::SpanBuilder;
+                        if let Ok(span) = SpanBuilder::start("orac.tick.ralph") {
+                            state.trace_store.record(span.finish_ok());
+                        }
+                    }
+
+                    // BUG-040 fix: Feed field state to emergence detector every tick
+                    feed_emergence_observations(&state, tick, &mut r_history, &mut k_history);
                 }
                 _ = shutdown.changed() => {
                     tracing::info!("RALPH evolution loop stopping");

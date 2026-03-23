@@ -60,6 +60,14 @@ pub async fn handle_post_tool_use(
     // Find session for this hook call
     let (session_id, pane_id_str) = find_session_pane(&state, &event);
 
+    // Increment total_tool_calls for ghost trace enrichment (BUG-L3-002 fix)
+    {
+        let mut sessions = state.sessions.write();
+        if let Some(tracker) = sessions.get_mut(&session_id) {
+            tracker.total_tool_calls += 1;
+        }
+    }
+
     // 1. Record memory (fire-and-forget)
     let mem_url = format!("{}/sphere/{}/memory", state.pv2_url, pane_id_str);
     let mem_body = serde_json::json!({
@@ -118,8 +126,13 @@ pub async fn handle_post_tool_use(
             if let Some(bb) = state.blackboard() {
                 use crate::m5_bridges::m26_blackboard::TaskRecord;
 
+                let now_ms = super::m10_hook_server::epoch_ms();
                 #[allow(clippy::cast_precision_loss)]
-                let now = super::m10_hook_server::epoch_ms() as f64 / 1000.0;
+                let now = now_ms as f64 / 1000.0;
+                let claimed_ms = get_task_claimed_ms(&state, &session_id);
+                #[allow(clippy::cast_precision_loss)]
+                let duration_secs = claimed_ms
+                    .map_or(0.0, |c| now_ms.saturating_sub(c) as f64 / 1000.0);
                 let pid = PaneId::new(&pane_id_str);
                 let _ = bb.insert_task(&TaskRecord {
                     task_id: task_id.clone(),
@@ -127,7 +140,7 @@ pub async fn handle_post_tool_use(
                     description: summary.clone(),
                     outcome: "completed".into(),
                     finished_at: now,
-                    duration_secs: 0.0,
+                    duration_secs,
                 });
                 // Increment tasks_completed
                 if let Ok(Some(mut pane)) = bb.get_pane(&pid) {
@@ -194,6 +207,10 @@ async fn poll_route_and_claim(
     let Some(task) = task else {
         return Json(HookResponse::empty());
     };
+
+    // Record dispatch domain for metrics
+    let domain = classify_content(&task.description);
+    state.record_dispatch(&domain);
 
     // Attempt atomic claim
     let claim_url = format!("{}/bus/claim/{}", state.pv2_url, task.id);
@@ -292,13 +309,20 @@ fn is_write_operation(tool_name: &str) -> bool {
     matches!(tool_name, "Write" | "Edit" | "Bash")
 }
 
-/// Truncate a string to at most `max_len` characters.
+/// Truncate a string to at most `max_len` characters (char-based, UTF-8 safe).
+///
+/// Uses `char_indices` to find the byte boundary at the `max_len`-th character,
+/// avoiding panics on multi-byte UTF-8 sequences (BUG-L3-003 fix).
 #[must_use]
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_owned()
     } else {
-        format!("{}...", &s[..max_len.min(s.len())])
+        let end = s
+            .char_indices()
+            .nth(max_len)
+            .map_or(s.len(), |(idx, _)| idx);
+        format!("{}...", &s[..end])
     }
 }
 
@@ -423,14 +447,25 @@ fn has_active_task(state: &OracState, session_id: &str) -> bool {
 fn clear_active_task(state: &OracState, session_id: &str) {
     if let Some(tracker) = state.sessions.write().get_mut(session_id) {
         tracker.active_task_id = None;
+        tracker.active_task_claimed_ms = None;
     }
 }
 
-/// Set the active task for a session.
+/// Set the active task for a session, recording the claim timestamp.
 fn set_active_task(state: &OracState, session_id: &str, task_id: &str) {
     if let Some(tracker) = state.sessions.write().get_mut(session_id) {
         tracker.active_task_id = Some(task_id.to_owned());
+        tracker.active_task_claimed_ms = Some(super::m10_hook_server::epoch_ms());
     }
+}
+
+/// Get the epoch ms when the active task was claimed (`None` if no active task).
+fn get_task_claimed_ms(state: &OracState, session_id: &str) -> Option<u64> {
+    state
+        .sessions
+        .read()
+        .get(session_id)
+        .and_then(|t| t.active_task_claimed_ms)
 }
 
 /// Increment and return the poll counter for a session.

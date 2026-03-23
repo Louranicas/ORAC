@@ -53,6 +53,15 @@ const SUBSCRIBE_TIMEOUT_SECS: u64 = 5;
 /// Receive timeout for individual frame reads (seconds).
 const RECV_TIMEOUT_SECS: u64 = 30;
 
+/// Initial backoff delay for reconnection (milliseconds).
+const BACKOFF_INITIAL_MS: u64 = 100;
+
+/// Maximum backoff delay for reconnection (milliseconds).
+const BACKOFF_MAX_MS: u64 = 5000;
+
+/// Maximum number of reconnection attempts before giving up.
+const BACKOFF_MAX_ATTEMPTS: u32 = 10;
+
 // ──────────────────────────────────────────────────────────────
 // IPC Client
 // ──────────────────────────────────────────────────────────────
@@ -183,20 +192,29 @@ impl IpcClient {
     pub async fn connect(&mut self) -> PvResult<()> {
         self.state = ConnectionState::Connecting;
 
-        let stream = tokio::time::timeout(
+        let stream = match tokio::time::timeout(
             std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
             UnixStream::connect(&self.socket_path),
         )
         .await
-        .map_err(|_| PvError::BusSocket(format!(
-            "handshake timeout after {}s connecting to {}",
-            HANDSHAKE_TIMEOUT_SECS,
-            self.socket_path.display(),
-        )))?
-        .map_err(|e| PvError::BusSocket(format!(
-            "failed to connect to {}: {e}",
-            self.socket_path.display(),
-        )))?;
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                self.state = ConnectionState::Disconnected;
+                return Err(PvError::BusSocket(format!(
+                    "failed to connect to {}: {e}",
+                    self.socket_path.display(),
+                )));
+            }
+            Err(_) => {
+                self.state = ConnectionState::Disconnected;
+                return Err(PvError::BusSocket(format!(
+                    "handshake timeout after {}s connecting to {}",
+                    HANDSHAKE_TIMEOUT_SECS,
+                    self.socket_path.display(),
+                )));
+            }
+        };
 
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -207,10 +225,19 @@ impl IpcClient {
             pane_id: self.pane_id.clone(),
             version: PROTOCOL_VERSION.to_owned(),
         };
-        write_ndjson_frame(&mut writer, &handshake).await?;
+        if let Err(e) = write_ndjson_frame(&mut writer, &handshake).await {
+            self.state = ConnectionState::Disconnected;
+            return Err(e);
+        }
 
         // Read welcome
-        let welcome = read_ndjson_frame(&mut reader, HANDSHAKE_TIMEOUT_SECS).await?;
+        let welcome = match read_ndjson_frame(&mut reader, HANDSHAKE_TIMEOUT_SECS).await {
+            Ok(frame) => frame,
+            Err(e) => {
+                self.state = ConnectionState::Disconnected;
+                return Err(e);
+            }
+        };
 
         match welcome {
             BusFrame::Welcome { session_id, .. } => {
@@ -334,6 +361,76 @@ impl IpcClient {
         self.session_id = None;
         self.subscriptions.clear();
         Ok(())
+    }
+
+    /// Connect with exponential backoff retry.
+    ///
+    /// Attempts to connect up to [`BACKOFF_MAX_ATTEMPTS`] times with delays
+    /// of 100ms, 200ms, 400ms, 800ms, 1600ms, capped at 5000ms.
+    /// Returns the number of attempts made on success.
+    ///
+    /// # Errors
+    /// Returns the last [`PvError`] if all attempts are exhausted.
+    pub async fn connect_with_backoff(&mut self) -> PvResult<u32> {
+        let mut delay_ms = BACKOFF_INITIAL_MS;
+        let mut last_err = None;
+
+        for attempt in 1..=BACKOFF_MAX_ATTEMPTS {
+            match self.connect().await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            attempt,
+                            "IPC reconnected after {} attempts",
+                            attempt
+                        );
+                    }
+                    return Ok(attempt);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        attempt,
+                        delay_ms,
+                        error = %e,
+                        "IPC connect attempt failed, retrying"
+                    );
+                    last_err = Some(e);
+                    if attempt < BACKOFF_MAX_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(BACKOFF_MAX_MS);
+                    }
+                }
+            }
+        }
+
+        // Ensure state is Disconnected after all attempts fail.
+        // BUG-L2-003 fix: last_err is always Some after >=1 loop iteration,
+        // but we keep the fallback for safety (BACKOFF_MAX_ATTEMPTS could be 0).
+        self.state = ConnectionState::Disconnected;
+        Err(last_err.unwrap_or_else(|| {
+            PvError::BusSocket("all reconnection attempts exhausted (zero attempts configured)".into())
+        }))
+    }
+
+    /// Reconnect after a disconnect: clean up state, then retry with backoff.
+    ///
+    /// # Errors
+    /// Returns [`PvError`] if backoff-limited reconnection fails.
+    pub async fn reconnect(&mut self) -> PvResult<u32> {
+        // Drop stale socket state
+        self.writer = None;
+        self.reader = None;
+        self.state = ConnectionState::Disconnected;
+        self.session_id = None;
+        // Preserve subscriptions for re-subscribe after reconnect
+
+        self.connect_with_backoff().await
+    }
+
+    /// The number of reconnection attempts allowed.
+    #[must_use]
+    pub const fn max_backoff_attempts() -> u32 {
+        BACKOFF_MAX_ATTEMPTS
     }
 
     /// Current active subscription patterns.
@@ -488,6 +585,7 @@ mod tests {
         let result = client.connect().await;
         assert!(result.is_err());
         assert!(!client.is_connected());
+        assert_eq!(client.connection_state(), ConnectionState::Disconnected);
         assert!(client.writer.is_none());
         assert!(client.reader.is_none());
     }
@@ -521,6 +619,57 @@ mod tests {
         let mut client = IpcClient::new(pid("test"));
         let result = client.disconnect().await;
         assert!(result.is_ok());
+    }
+
+    // ── Backoff reconnection ──
+
+    #[test]
+    fn backoff_constants() {
+        assert_eq!(BACKOFF_INITIAL_MS, 100);
+        assert_eq!(BACKOFF_MAX_MS, 5000);
+        assert_eq!(BACKOFF_MAX_ATTEMPTS, 10);
+    }
+
+    #[test]
+    fn backoff_sequence() {
+        let mut delay = BACKOFF_INITIAL_MS;
+        let expected = [100, 200, 400, 800, 1600, 3200, 5000, 5000];
+        for &exp in &expected {
+            assert_eq!(delay, exp);
+            delay = (delay * 2).min(BACKOFF_MAX_MS);
+        }
+    }
+
+    #[test]
+    fn max_backoff_attempts_accessor() {
+        assert_eq!(IpcClient::max_backoff_attempts(), 10);
+    }
+
+    #[tokio::test]
+    async fn connect_with_backoff_fails_no_socket() {
+        let mut client = IpcClient::with_socket_path(
+            pid("test"),
+            "/tmp/nonexistent-orac-backoff-test.sock",
+        );
+        let result = client.connect_with_backoff().await;
+        assert!(result.is_err());
+        assert!(!client.is_connected());
+    }
+
+    #[tokio::test]
+    async fn reconnect_resets_state() {
+        let mut client = IpcClient::with_socket_path(
+            pid("test"),
+            "/tmp/nonexistent-orac-reconnect-test.sock",
+        );
+        // Force some state
+        client.subscriptions = vec!["field.*".into()];
+        // reconnect should fail (no socket) but subscriptions preserved for re-subscribe
+        let result = client.reconnect().await;
+        assert!(result.is_err());
+        assert_eq!(client.connection_state(), ConnectionState::Disconnected);
+        // subscriptions preserved for re-subscribe attempt
+        assert!(!client.subscriptions().is_empty());
     }
 
     // ── Loopback integration: connect, subscribe, send, recv, disconnect ──

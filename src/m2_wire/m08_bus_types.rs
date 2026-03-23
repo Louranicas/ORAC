@@ -101,6 +101,9 @@ pub struct BusTask {
     pub claimed_at: Option<f64>,
     /// Unix timestamp when the task was completed (if any).
     pub completed_at: Option<f64>,
+    /// Number of times this task has been requeued (BUG-L2-004: audit trail).
+    #[serde(default)]
+    pub requeue_count: u32,
 }
 
 impl BusTask {
@@ -117,6 +120,7 @@ impl BusTask {
             submitted_at: now_secs(),
             claimed_at: None,
             completed_at: None,
+            requeue_count: 0,
         }
     }
 
@@ -144,6 +148,8 @@ impl BusTask {
     }
 
     /// Requeue a claimed task back to pending (for stale claim recovery).
+    ///
+    /// Increments `requeue_count` for audit trail (BUG-L2-004).
     pub fn requeue(&mut self) -> bool {
         if self.status != TaskStatus::Claimed {
             return false;
@@ -151,6 +157,7 @@ impl BusTask {
         self.status = TaskStatus::Pending;
         self.claimed_by = None;
         self.claimed_at = None;
+        self.requeue_count = self.requeue_count.saturating_add(1);
         true
     }
 
@@ -223,13 +230,33 @@ impl BusEvent {
     }
 
     /// Whether this event matches a glob pattern (supports `*` wildcard).
+    ///
+    /// Supported patterns:
+    /// - `"*"` — matches everything
+    /// - `"prefix*"` — trailing wildcard (starts-with)
+    /// - `"*suffix"` — leading wildcard (ends-with)
+    /// - `"prefix*suffix"` — mid-string wildcard (starts-with AND ends-with)
+    /// - `"exact.match"` — exact string equality
     #[must_use]
     pub fn matches_pattern(&self, pattern: &str) -> bool {
         if pattern == "*" {
             return true;
         }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return self.event_type.starts_with(prefix);
+        if let Some(pos) = pattern.find('*') {
+            let prefix = &pattern[..pos];
+            let suffix = &pattern[pos + 1..];
+            if suffix.is_empty() {
+                // Trailing wildcard: "field.*"
+                return self.event_type.starts_with(prefix);
+            }
+            if prefix.is_empty() {
+                // Leading wildcard: "*.tick"
+                return self.event_type.ends_with(suffix);
+            }
+            // Mid-string wildcard: "field.*.tick"
+            return self.event_type.starts_with(prefix)
+                && self.event_type.ends_with(suffix)
+                && self.event_type.len() >= prefix.len() + suffix.len();
         }
         self.event_type == pattern
     }
@@ -654,6 +681,36 @@ mod tests {
     fn bus_event_no_match_partial() {
         let ev = BusEvent::text("field.tick", "x", 0);
         assert!(!ev.matches_pattern("field.tock"));
+    }
+
+    #[test]
+    fn bus_event_matches_leading_wildcard() {
+        let ev = BusEvent::text("field.tick", "x", 0);
+        assert!(ev.matches_pattern("*.tick"));
+    }
+
+    #[test]
+    fn bus_event_leading_wildcard_no_match() {
+        let ev = BusEvent::text("field.tick", "x", 0);
+        assert!(!ev.matches_pattern("*.tock"));
+    }
+
+    #[test]
+    fn bus_event_matches_mid_wildcard() {
+        let ev = BusEvent::text("field.alpha.tick", "x", 0);
+        assert!(ev.matches_pattern("field.*.tick"));
+    }
+
+    #[test]
+    fn bus_event_mid_wildcard_no_match() {
+        let ev = BusEvent::text("field.alpha.tock", "x", 0);
+        assert!(!ev.matches_pattern("field.*.tick"));
+    }
+
+    #[test]
+    fn bus_event_mid_wildcard_empty_middle() {
+        let ev = BusEvent::text("field.tick", "x", 0);
+        assert!(ev.matches_pattern("field.*tick"));
     }
 
     #[test]

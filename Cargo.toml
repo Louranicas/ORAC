@@ -21,6 +21,10 @@ path = "src/bin/client.rs"
 name = "orac-probe"
 path = "src/bin/probe.rs"
 
+[[bin]]
+name = "ralph-bench"
+path = "src/bin/ralph_bench.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["json"], optional = true }

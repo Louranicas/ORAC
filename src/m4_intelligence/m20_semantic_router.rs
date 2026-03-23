@@ -169,9 +169,19 @@ pub fn classify_content(content: &str) -> SemanticDomain {
     }
 }
 
-/// Count how many keywords appear in the text.
+/// Count how many keywords appear in the text as whole words.
+///
+/// Splits on non-alphanumeric boundaries to avoid false substring matches
+/// (e.g. "thread" no longer matches "read") (BUG-L4-004 fix).
 fn count_keywords(text: &str, keywords: &[&str]) -> usize {
-    keywords.iter().filter(|kw| text.contains(**kw)).count()
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    keywords
+        .iter()
+        .filter(|kw| words.iter().any(|w| *w == **kw))
+        .count()
 }
 
 // ──────────────────────────────────────────────────────────────

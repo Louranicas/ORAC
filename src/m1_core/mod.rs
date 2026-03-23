@@ -11,7 +11,7 @@
 //! | `m02` | Error Handling | Unified error enum, `ErrorClassifier` trait (`Send + Sync + Debug`) |
 //! | `m03` | Config | TOML + env overlay (port, bridges, hooks, evolution) |
 //! | `m04` | Constants | Thresholds, intervals, budgets, limits |
-//! | `m05` | Traits | `Oscillator`, `Learnable`, `Bridgeable`, `Persistable`, `FieldObserver` |
+//! | `m05` | Traits | `Bridgeable` |
 //! | `m06` | Validation | Input validators (persona, `tool_name`, summary, phase, body) |
 //!
 //! ## Design Invariants
@@ -30,7 +30,7 @@ pub mod m02_error_handling;
 pub mod m03_config;
 /// Named constants: thresholds, intervals, budgets, limits
 pub mod m04_constants;
-/// Core traits (`Oscillator`, `Learnable`, `Bridgeable`, `Persistable`, `FieldObserver`)
+/// Core traits (`Bridgeable`)
 pub mod m05_traits;
 /// Input validators for persona, `tool_name`, summary, frequency, phase, body
 pub mod m06_validation;

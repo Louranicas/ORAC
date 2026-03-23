@@ -25,11 +25,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
-use std::time::SystemTime;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::m1_core::m01_core_types::now_secs;
 use crate::m1_core::m02_error_handling::PvResult;
 
 // ──────────────────────────────────────────────────────────────
@@ -655,12 +655,7 @@ fn format_gauge(out: &mut String, name: &str, help: &str, gauge: &Gauge) {
     }
 }
 
-/// Current time as Unix seconds.
-fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-}
+// now_secs() imported from m01_core_types (centralized)
 
 // ──────────────────────────────────────────────────────────────
 // Tests

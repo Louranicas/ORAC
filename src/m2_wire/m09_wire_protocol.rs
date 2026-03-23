@@ -483,6 +483,29 @@ impl WireProtocol {
         (now - last) >= interval
     }
 
+    /// Send a keepalive frame and record the activity.
+    ///
+    /// Increments `keepalives_sent` and updates `last_activity` timestamp.
+    ///
+    /// # Errors
+    /// Returns [`PvError::BusProtocol`] if not in `Active` state or if the
+    /// send queue is full.
+    pub fn send_keepalive(&self) -> PvResult<()> {
+        if !self.state().can_send_data() {
+            return Err(PvError::BusProtocol(
+                format!("cannot send keepalive in state {}", self.state()),
+            ));
+        }
+
+        // Keepalive is an empty event frame with type "keepalive"
+        let frame = BusFrame::Event {
+            event: crate::m2_wire::m08_bus_types::BusEvent::text("keepalive", "", 0),
+        };
+        self.enqueue_frame(&frame)?;
+        self.stats.write().keepalives_sent += 1;
+        Ok(())
+    }
+
     /// Force a connection reset to `Disconnected`.
     pub fn force_reset(&self) {
         self.transition_to(ProtocolState::Disconnected);
@@ -495,6 +518,10 @@ impl WireProtocol {
     // ── Internal ──
 
     /// Serialize and enqueue a frame for sending.
+    ///
+    /// Returns `Err(`[`PvError::BusProtocol`]`)` with a `"queue full"` message
+    /// if the send queue is at capacity, rather than silently dropping the
+    /// oldest frame. Callers can decide how to handle back-pressure.
     fn enqueue_frame(&self, frame: &BusFrame) -> PvResult<()> {
         let json = frame.to_ndjson().map_err(|e| PvError::BusProtocol(e.to_string()))?;
 
@@ -506,7 +533,9 @@ impl WireProtocol {
 
         let mut queue = self.send_queue.write();
         if queue.len() >= MAX_SEND_QUEUE {
-            queue.pop_front();
+            return Err(PvError::BusProtocol(
+                format!("send queue full ({MAX_SEND_QUEUE} frames)"),
+            ));
         }
         #[allow(clippy::cast_precision_loss)]
         {
@@ -869,16 +898,53 @@ mod tests {
         wp.subscribe(vec!["f.*".into()]).unwrap();
         wp.process_incoming(r#"{"type":"Subscribed","count":1}"#).unwrap();
 
-        // Enqueue many tasks
+        // Fill the queue to capacity
+        let mut errors = 0_usize;
         for _ in 0..MAX_SEND_QUEUE + 10 {
             let task = crate::m2_wire::m08_bus_types::BusTask::new(
                 "test".into(),
                 crate::m2_wire::m08_bus_types::TaskTarget::AnyIdle,
                 PaneId::new("orac"),
             );
-            wp.submit_task(task).ok();
+            if wp.submit_task(task).is_err() {
+                errors += 1;
+            }
         }
         assert!(wp.send_queue_len() <= MAX_SEND_QUEUE);
+        // Queue was already partially filled (handshake + subscribe), so
+        // errors should fire once we exceed capacity.
+        assert!(errors > 0, "should reject when queue is full");
+    }
+
+    #[test]
+    fn enqueue_full_returns_error_not_silent_drop() {
+        let wp = make_protocol();
+        wp.initiate_handshake().unwrap();
+        wp.process_incoming(r#"{"type":"Welcome","session_id":"s","version":"2.0"}"#).unwrap();
+        wp.subscribe(vec!["f.*".into()]).unwrap();
+        wp.process_incoming(r#"{"type":"Subscribed","count":1}"#).unwrap();
+
+        let sent_before = wp.stats().frames_sent;
+        // Fill queue exactly to capacity
+        while wp.send_queue_len() < MAX_SEND_QUEUE {
+            let task = crate::m2_wire::m08_bus_types::BusTask::new(
+                "filler".into(),
+                crate::m2_wire::m08_bus_types::TaskTarget::AnyIdle,
+                PaneId::new("orac"),
+            );
+            wp.submit_task(task).ok();
+        }
+        let sent_at_capacity = wp.stats().frames_sent;
+
+        // Next submit should fail without incrementing frames_sent
+        let task = crate::m2_wire::m08_bus_types::BusTask::new(
+            "overflow".into(),
+            crate::m2_wire::m08_bus_types::TaskTarget::AnyIdle,
+            PaneId::new("orac"),
+        );
+        assert!(wp.submit_task(task).is_err());
+        assert_eq!(wp.stats().frames_sent, sent_at_capacity);
+        assert!(sent_at_capacity > sent_before);
     }
 
     #[test]
@@ -912,5 +978,26 @@ mod tests {
     fn with_keepalive_sets_interval() {
         let wp = WireProtocol::with_keepalive(PaneId::new("test"), 60);
         assert_eq!(wp.keepalive_secs, 60);
+    }
+
+    #[test]
+    fn send_keepalive_increments_counter() {
+        let wp = make_protocol();
+        wp.initiate_handshake().unwrap();
+        wp.process_incoming(r#"{"type":"Welcome","session_id":"s","version":"2.0"}"#).unwrap();
+        wp.subscribe(vec!["f.*".into()]).unwrap();
+        wp.process_incoming(r#"{"type":"Subscribed","count":1}"#).unwrap();
+
+        assert_eq!(wp.stats().keepalives_sent, 0);
+        wp.send_keepalive().unwrap();
+        assert_eq!(wp.stats().keepalives_sent, 1);
+        wp.send_keepalive().unwrap();
+        assert_eq!(wp.stats().keepalives_sent, 2);
+    }
+
+    #[test]
+    fn send_keepalive_rejected_before_active() {
+        let wp = make_protocol();
+        assert!(wp.send_keepalive().is_err());
     }
 }

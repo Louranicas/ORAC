@@ -7,7 +7,7 @@
 //! ## Module: M04
 //! ## Dependencies: None
 
-use std::f64::consts::{FRAC_PI_3, FRAC_PI_6, TAU};
+use std::f64::consts::{FRAC_PI_3, TAU};
 
 // ──────────────────────────────────────────────────────────────
 // Tick timing
@@ -58,12 +58,6 @@ pub const WEIGHT_EXPONENT: f64 = 2.0;
 /// Phase gap for chimera detection (π/3 radians).
 pub const PHASE_GAP_THRESHOLD: f64 = FRAC_PI_3;
 
-/// Minimum gap for fine-grained cluster separation (π/6 radians).
-pub const PHASE_GAP_MINIMUM: f64 = FRAC_PI_6;
-
-/// Fine-grained gap (π/12 radians).
-pub const PHASE_GAP_FINE: f64 = FRAC_PI_6 * 0.5;
-
 /// Order parameter above which the field is considered synchronized.
 pub const SYNC_THRESHOLD: f64 = 0.5;
 
@@ -75,9 +69,6 @@ pub const R_HIGH_THRESHOLD: f64 = 0.8;
 
 /// `r` below which the field is considered incoherent.
 pub const R_LOW_THRESHOLD: f64 = 0.3;
-
-/// `r` threshold below which `NeedsCoherence` triggers.
-pub const R_COHERENCE_THRESHOLD: f64 = 0.5;
 
 /// `r` trend: falling faster than this triggers `RTrend::Falling`.
 pub const R_FALLING_THRESHOLD: f64 = -0.03;
@@ -100,9 +91,6 @@ pub const R_TARGET_LARGE_FLEET: f64 = 0.85;
 
 /// Sphere count (as `f64`) above which `R_TARGET_LARGE_FLEET` applies.
 pub const LARGE_FLEET_THRESHOLD: f64 = 50.0;
-
-/// EMA smoothing factor for sphere count hysteresis.
-pub const SPHERE_COUNT_EMA_ALPHA: f64 = 0.1;
 
 // ──────────────────────────────────────────────────────────────
 // Conductor (breathing controller)
@@ -165,39 +153,17 @@ pub const DECAY_PER_STEP: f64 = 0.995;
 /// Boost strength from sweep activation.
 pub const SWEEP_BOOST: f64 = 0.05;
 
-/// Sweep influence radius (radians).
-pub const SWEEP_SIGMA: f64 = 0.4;
-
 /// Activation threshold below which memories are prunable.
 pub const ACTIVATION_THRESHOLD: f64 = 0.3;
 
-/// Buoy home-drift rate per tick.
-pub const BUOY_HOME_DECAY: f64 = 0.001;
-
-/// Co-activation tracking window (steps).
-pub const CO_ACTIVATION_WINDOW: usize = 50;
-
 /// Steps between memory prune checks.
 pub const MEMORY_PRUNE_INTERVAL: u64 = 200;
-
-/// Activation threshold below which a memory is considered dead.
-pub const TRACE_PRUNE_THRESHOLD: f64 = 0.05;
 
 /// Gentle semantic nudge strength (doesn't override coupling).
 pub const SEMANTIC_NUDGE_STRENGTH: f64 = 0.02;
 
 /// Steps during which a newcomer gets boosted LTP.
 pub const NEWCOMER_STEPS: u64 = 50;
-
-// ──────────────────────────────────────────────────────────────
-// Ghost trace
-// ──────────────────────────────────────────────────────────────
-
-/// Seconds of inactivity before a ghost warning is issued.
-pub const GHOST_WARN_SECS: f64 = 300.0;
-
-/// Seconds of inactivity before automatic deregistration.
-pub const GHOST_DEREGISTER_SECS: f64 = 900.0;
 
 // ──────────────────────────────────────────────────────────────
 // Persistence
@@ -260,8 +226,7 @@ mod tests {
 
     #[test]
     fn r_thresholds_ordered() {
-        assert!(R_LOW_THRESHOLD < R_COHERENCE_THRESHOLD);
-        assert!(R_COHERENCE_THRESHOLD <= R_HIGH_THRESHOLD);
+        assert!(R_LOW_THRESHOLD < R_HIGH_THRESHOLD);
         assert!(R_HIGH_THRESHOLD < R_TARGET_BASE);
     }
 
@@ -271,12 +236,6 @@ mod tests {
         assert!(K_MOD_BUDGET_MIN < K_MOD_BUDGET_MAX);
         assert!(K_MOD_BUDGET_MIN > K_MOD_MIN);
         assert!(K_MOD_BUDGET_MAX < K_MOD_MAX);
-    }
-
-    #[test]
-    fn phase_gap_thresholds_ordered() {
-        assert!(PHASE_GAP_FINE < PHASE_GAP_MINIMUM);
-        assert!(PHASE_GAP_MINIMUM < PHASE_GAP_THRESHOLD);
     }
 
     #[test]
