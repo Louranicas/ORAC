@@ -142,6 +142,13 @@ fn raw_http_post_with_content_type(
         url: addr.to_owned(),
     })?;
 
+    // Set write timeout to prevent blocking the spawn_blocking thread pool
+    // if the server accepts the connection but stalls on receiving data.
+    stream.set_write_timeout(Some(timeout)).map_err(|_| PvError::BridgeUnreachable {
+        service: service.to_owned(),
+        url: addr.to_owned(),
+    })?;
+
     let host = addr.split(':').next().unwrap_or("localhost");
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",

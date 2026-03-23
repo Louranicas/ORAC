@@ -89,6 +89,9 @@ fn open_blackboard() -> Option<Mutex<Blackboard>> {
 // Consent types (FIX-018)
 // ──────────────────────────────────────────────────────────────
 
+/// Serde default helper — returns `true` for backward-compatible consent fields.
+const fn default_true() -> bool { true }
+
 /// Per-sphere consent declarations for ORAC bridge operations.
 ///
 /// Controls which ORAC bridges may read/write data for this sphere.
@@ -102,6 +105,9 @@ pub struct OracConsent {
     pub povm_read: bool,
     /// Allow POVM bridge to write data for this sphere.
     pub povm_write: bool,
+    /// Allow Reasoning Memory bridge to write data for this sphere.
+    #[serde(default = "default_true")]
+    pub rm_write: bool,
     /// Allow session hydration from POVM + RM on `SessionStart`.
     pub hydration: bool,
     /// Epoch milliseconds when this consent was last updated.
@@ -116,6 +122,7 @@ impl OracConsent {
             synthex_write: true,
             povm_read: true,
             povm_write: false,
+            rm_write: true,
             hydration: true,
             updated_ms: epoch_ms(),
         }
@@ -556,6 +563,7 @@ impl OracState {
             "synthex_write" => consent.synthex_write,
             "povm_read" => consent.povm_read,
             "povm_write" => consent.povm_write,
+            "rm_write" => consent.rm_write,
             "hydration" => consent.hydration,
             _ => true, // unknown fields default to allowed
         }
@@ -1049,12 +1057,14 @@ pub async fn http_post(url: &str, body: &str, timeout_ms: u64) -> Option<String>
 
 /// Generate a pane ID for this ORAC session.
 ///
-/// Uses hostname and PID for uniqueness.
+/// Uses hostname, PID, and a UUID suffix to ensure uniqueness across
+/// concurrent sessions hitting the same daemon process.
 #[must_use]
 pub fn generate_pane_id() -> PaneId {
     let hostname = std::env::var("HOSTNAME")
         .unwrap_or_else(|_| "orac".into());
-    PaneId::new(format!("{hostname}:{}", std::process::id()))
+    let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
+    PaneId::new(format!("{hostname}:{}:{short_uuid}", std::process::id()))
 }
 
 // ──────────────────────────────────────────────────────────────

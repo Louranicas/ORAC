@@ -200,6 +200,8 @@ struct ActiveMutation {
     snapshot: StateSnapshot,
     /// Tick when applied.
     applied_at_tick: u64,
+    /// Generation number for mutation history lookup (avoids `back_mut()` race).
+    generation: u64,
 }
 
 /// Configuration for the RALPH engine.
@@ -583,6 +585,7 @@ impl RalphEngine {
                     proposal,
                     snapshot,
                     applied_at_tick: tick,
+                    generation,
                 });
 
                 // Feed into correlation engine
@@ -649,10 +652,12 @@ impl RalphEngine {
                 MutationStatus::RolledBack
             };
 
-            // Update mutation history
+            // Update mutation history — look up by generation, not back_mut(),
+            // to prevent race if propose and harvest interleave under concurrent callers.
             {
+                let target_gen = active_mut.generation;
                 let mut hist = self.mutation_history.write();
-                if let Some(record) = hist.back_mut() {
+                if let Some(record) = hist.iter_mut().rev().find(|r| r.generation == target_gen) {
                     record.status = harvest_status;
                     record.fitness_after = current_fitness;
                     record.harvested_at_tick = tick;

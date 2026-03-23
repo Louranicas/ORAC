@@ -175,6 +175,7 @@ pub async fn handle_stop(
     }
 
     // Consent + breaker-gated: RM crystallize
+    #[cfg(feature = "intelligence")]
     if state.consent_allows(&pane_id_str, "rm_write") && state.breaker_allows("rm") {
         let rm_put_url = format!("{}/put", state.rm_url);
         let rm_tsv = format!(
@@ -200,6 +201,14 @@ pub async fn handle_stop(
         tracing::info!("Consent: rm_write denied for {}", pane_id_str);
     } else {
         tracing::debug!("Breaker open for rm, skipping crystallize");
+    }
+    #[cfg(not(feature = "intelligence"))]
+    if state.consent_allows(&pane_id_str, "rm_write") {
+        let rm_put_url = format!("{}/put", state.rm_url);
+        let rm_tsv = format!(
+            "session\t{pane_id_str}\tsession-end\t3600\tsession-end r={r_value}"
+        );
+        fire_and_forget_post(rm_put_url, rm_tsv);
     }
 
     // 5b. Update blackboard: record failed task (if any), mark Complete

@@ -184,14 +184,14 @@ fn spawn_ipc_listener(state: Arc<OracState>) {
 fn feed_emergence_observations(
     state: &OracState,
     tick: u64,
-    r_history: &mut Vec<f64>,
-    k_history: &mut Vec<f64>,
+    r_history: &mut std::collections::VecDeque<f64>,
+    k_history: &mut std::collections::VecDeque<f64>,
 ) {
     // Sample current r from cached field state
     let r = state.field_state.read().field.order.r;
-    r_history.push(r);
+    r_history.push_back(r);
     if r_history.len() > EMERGENCE_HISTORY_CAP {
-        r_history.remove(0);
+        r_history.pop_front();
     }
 
     // Sample effective K from coupling network (K * k_modulation)
@@ -201,20 +201,27 @@ fn feed_emergence_observations(
         let w: Vec<f64> = network.connections.iter().map(|c| c.weight).collect();
         (k, w)
     };
-    k_history.push(k_eff);
+    k_history.push_back(k_eff);
     if k_history.len() > EMERGENCE_HISTORY_CAP {
-        k_history.remove(0);
+        k_history.pop_front();
     }
 
     let detector = state.ralph.emergence();
 
+    // Make contiguous slices for detector APIs that expect &[f64]
+    let (r_a, r_b) = r_history.as_slices();
+    let (k_a, k_b) = k_history.as_slices();
+    // VecDeque is contiguous after push_back + pop_front pattern
+    let r_slice = if r_b.is_empty() { r_a } else { r_history.make_contiguous() };
+    let k_slice = if k_b.is_empty() { k_a } else { k_history.make_contiguous() };
+
     // 1. Coherence lock detection
-    if let Err(e) = detector.detect_coherence_lock(r_history, tick) {
+    if let Err(e) = detector.detect_coherence_lock(r_slice, tick) {
         tracing::debug!("Emergence coherence_lock check error: {e}");
     }
 
     // 2. Coupling runaway detection
-    if let Err(e) = detector.detect_coupling_runaway(k_history, r_history, tick) {
+    if let Err(e) = detector.detect_coupling_runaway(k_slice, r_slice, tick) {
         tracing::debug!("Emergence coupling_runaway check error: {e}");
     }
 
@@ -263,8 +270,8 @@ fn spawn_ralph_loop(
 
         tracing::info!("RALPH evolution loop started (5s interval)");
 
-        let mut r_history: Vec<f64> = Vec::with_capacity(EMERGENCE_HISTORY_CAP);
-        let mut k_history: Vec<f64> = Vec::with_capacity(EMERGENCE_HISTORY_CAP);
+        let mut r_history: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(EMERGENCE_HISTORY_CAP);
+        let mut k_history: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(EMERGENCE_HISTORY_CAP);
 
         loop {
             tokio::select! {
