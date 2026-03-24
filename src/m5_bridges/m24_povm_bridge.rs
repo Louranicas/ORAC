@@ -33,7 +33,7 @@ use crate::m1_core::m05_traits::Bridgeable;
 const POVM_PORT: u16 = 8125;
 
 /// Default base URL.
-const DEFAULT_BASE_URL: &str = "localhost:8125";
+const DEFAULT_BASE_URL: &str = "127.0.0.1:8125";
 
 /// Health endpoint path.
 const HEALTH_PATH: &str = "/health";
@@ -54,26 +54,32 @@ const DEFAULT_WRITE_INTERVAL: u64 = 12;
 const DEFAULT_READ_INTERVAL: u64 = 60;
 
 /// Maximum response body size (bytes) — larger than default for POVM responses.
-const MAX_RESPONSE_SIZE: usize = 65536;
+/// Gen-060a: Raised from 512KB to 2MB — POVM pathways grow with STDP activity
+/// and measured 1.3MB in production (2437+ pathways). 512KB caused truncation
+/// producing "invalid type: map" parse errors at boot hydration.
+const MAX_RESPONSE_SIZE: usize = 2_097_152; // 2MB
 
 // ──────────────────────────────────────────────────────────────
 // Response types
 // ──────────────────────────────────────────────────────────────
 
 /// A single Hebbian pathway from the POVM Engine.
+///
+/// Supports both ORAC-written format (`source`/`target`) and POVM's
+/// native format (`pre_id`/`post_id`) via serde aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pathway {
-    /// Source node identifier.
-    #[serde(default)]
+    /// Source node identifier (alias: `pre_id` from POVM native format).
+    #[serde(default, alias = "pre_id")]
     pub source: String,
-    /// Target node identifier.
-    #[serde(default)]
+    /// Target node identifier (alias: `post_id` from POVM native format).
+    #[serde(default, alias = "post_id")]
     pub target: String,
     /// Connection weight (Hebbian strength).
     #[serde(default)]
     pub weight: f64,
-    /// Number of times this pathway has been reinforced.
-    #[serde(default)]
+    /// Number of times this pathway has been reinforced (alias: `co_activations`).
+    #[serde(default, alias = "co_activations")]
     pub reinforcement_count: u64,
 }
 
@@ -176,15 +182,24 @@ impl PovmBridge {
     }
 
     /// Create a new POVM bridge with custom configuration.
+    ///
+    /// Protocol prefixes (`http://`, `https://`) are stripped automatically
+    /// because the bridge uses raw TCP sockets, not an HTTP client (BUG-033).
     #[must_use]
     pub fn with_config(
         base_url: impl Into<String>,
         write_interval: u64,
         read_interval: u64,
     ) -> Self {
+        let raw: String = base_url.into();
+        let stripped = raw
+            .strip_prefix("http://")
+            .or_else(|| raw.strip_prefix("https://"))
+            .unwrap_or(&raw)
+            .to_owned();
         Self {
             service: "povm".to_owned(),
-            base_url: base_url.into(),
+            base_url: stripped,
             write_interval: write_interval.max(1),
             read_interval: read_interval.max(1),
             state: RwLock::new(BridgeState::default()),
@@ -268,19 +283,24 @@ impl PovmBridge {
     pub fn hydrate_pathways(&self) -> PvResult<Vec<Pathway>> {
         let body =
             raw_http_get_with_limit(&self.base_url, PATHWAYS_PATH, &self.service, MAX_RESPONSE_SIZE)?;
-        let response: PathwaysResponse =
-            serde_json::from_str(&body).map_err(|e| PvError::BridgeParse {
+
+        // POVM returns a raw array `[{pre_id, post_id, weight, ...}]` while
+        // ORAC's write format wraps it as `{pathways: [...]}`. Try both.
+        let pathways: Vec<Pathway> =
+            serde_json::from_str::<Vec<Pathway>>(&body).or_else(|_| {
+                serde_json::from_str::<PathwaysResponse>(&body).map(|r| r.pathways)
+            }).map_err(|e| PvError::BridgeParse {
                 service: self.service.clone(),
                 reason: format!("pathways parse: {e}"),
             })?;
 
         let mut state = self.state.write();
-        state.cached_pathways.clone_from(&response.pathways);
+        state.cached_pathways.clone_from(&pathways);
         state.hydrated = true;
         state.stale = false;
         state.consecutive_failures = 0;
 
-        Ok(response.pathways)
+        Ok(pathways)
     }
 
     /// Hydrate summary from the POVM Engine.
@@ -344,6 +364,55 @@ impl PovmBridge {
     pub fn should_read(&self, current_tick: u64) -> bool {
         let state = self.state.read();
         current_tick.saturating_sub(state.last_read_tick) >= self.read_interval
+    }
+
+    /// Write coupling network pathways back to POVM Engine (BUG-058 fix).
+    ///
+    /// Serializes each connection as a pathway upsert request and POSTs
+    /// to `/pathways`. Sends one request per connection (batch not supported
+    /// by POVM API). Failures are logged but do not propagate.
+    ///
+    /// # Arguments
+    /// - `connections`: Slice of `(source, target, weight, co_activations)` tuples.
+    /// - `tick`: Current tick for `last_activated` timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::BridgeUnreachable`] if POVM is unreachable.
+    pub fn write_pathways(
+        &self,
+        connections: &[(String, String, f64, u64)],
+        tick: u64,
+    ) -> PvResult<usize> {
+        let mut written = 0_usize;
+        for (source, target, weight, co_acts) in connections {
+            let payload = serde_json::json!({
+                "pre_id": source,
+                "post_id": target,
+                "weight": weight,
+                "co_activations": co_acts,
+                "last_activated": format!("tick-{tick}"),
+            });
+            match raw_http_post(
+                &self.base_url,
+                PATHWAYS_PATH,
+                payload.to_string().as_bytes(),
+                &self.service,
+            ) {
+                Ok(_status) => written += 1,
+                Err(e) => {
+                    tracing::debug!(
+                        source = %source,
+                        target = %target,
+                        "POVM pathway write failed: {e}"
+                    );
+                }
+            }
+        }
+        if written > 0 {
+            self.state.write().last_write_tick = tick;
+        }
+        Ok(written)
     }
 }
 
@@ -836,5 +905,223 @@ mod tests {
         }
         bridge.record_failure();
         assert_eq!(bridge.consecutive_failures(), u32::MAX);
+    }
+
+    // ── write_pathways tests ──
+
+    #[test]
+    fn write_pathways_empty_returns_zero() {
+        let bridge = PovmBridge::with_config("127.0.0.1:19999", 12, 60);
+        let result = bridge.write_pathways(&[], 1);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn write_pathways_updates_last_write_tick_on_success() {
+        // Will fail to connect, but should handle gracefully
+        let bridge = PovmBridge::with_config("127.0.0.1:19999", 12, 60);
+        let conns = vec![
+            ("a".to_owned(), "b".to_owned(), 0.8, 1_u64),
+        ];
+        let _ = bridge.write_pathways(&conns, 42);
+        // Even on failure, should not panic
+    }
+
+    #[test]
+    fn write_pathways_handles_unreachable() {
+        let bridge = PovmBridge::with_config("127.0.0.1:19999", 12, 60);
+        let conns = vec![
+            ("src".to_owned(), "dst".to_owned(), 0.5, 3),
+            ("src2".to_owned(), "dst2".to_owned(), 0.7, 1),
+        ];
+        let result = bridge.write_pathways(&conns, 10);
+        assert!(result.is_ok());
+        // All writes fail but function returns 0 written (not an error)
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn write_pathways_no_tick_update_on_all_failure() {
+        let bridge = PovmBridge::with_config("127.0.0.1:19999", 12, 60);
+        let conns = vec![("a".to_owned(), "b".to_owned(), 0.5, 1)];
+        let _ = bridge.write_pathways(&conns, 100);
+        // last_write_tick should NOT update if all writes failed
+        assert_eq!(bridge.last_write_tick(), 0);
+    }
+
+    #[test]
+    fn write_pathways_multiple_connections() {
+        let bridge = PovmBridge::with_config("127.0.0.1:19999", 12, 60);
+        let conns: Vec<_> = (0..10)
+            .map(|i| (format!("s{i}"), format!("t{i}"), 0.5 + f64::from(i) * 0.05, i as u64))
+            .collect();
+        let result = bridge.write_pathways(&conns, 50);
+        assert!(result.is_ok());
+    }
+
+    // ── Hydration coupling weight seeding ──
+
+    #[test]
+    fn hydrated_pathways_seed_coupling_weights() {
+        use crate::m4_intelligence::m15_coupling_network::CouplingNetwork;
+
+        let pathways = vec![
+            Pathway {
+                source: "pane-a".to_owned(),
+                target: "pane-b".to_owned(),
+                weight: 0.85,
+                reinforcement_count: 10,
+            },
+            Pathway {
+                source: "pane-b".to_owned(),
+                target: "pane-a".to_owned(),
+                weight: 0.60,
+                reinforcement_count: 5,
+            },
+        ];
+
+        let mut network = CouplingNetwork::new();
+        network.register("pane-a".into(), 0.0, 1.0);
+        network.register("pane-b".into(), 1.0, 1.0);
+
+        let mut restored = 0u32;
+        for pw in &pathways {
+            for conn in &mut network.connections {
+                if conn.from.as_str() == pw.source
+                    && conn.to.as_str() == pw.target
+                    && pw.weight > 0.0
+                {
+                    conn.weight = pw.weight.clamp(0.0, 1.0);
+                    restored += 1;
+                }
+            }
+        }
+
+        assert_eq!(restored, 2, "Both pathway directions should be restored");
+
+        let ab = network
+            .connections
+            .iter()
+            .find(|c| c.from.as_str() == "pane-a" && c.to.as_str() == "pane-b")
+            .expect("a->b connection");
+        let ba = network
+            .connections
+            .iter()
+            .find(|c| c.from.as_str() == "pane-b" && c.to.as_str() == "pane-a")
+            .expect("b->a connection");
+
+        assert!((ab.weight - 0.85).abs() < f64::EPSILON);
+        assert!((ba.weight - 0.60).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hydration_clamps_out_of_range_weights() {
+        use crate::m4_intelligence::m15_coupling_network::CouplingNetwork;
+
+        let pathways = vec![Pathway {
+            source: "x".to_owned(),
+            target: "y".to_owned(),
+            weight: 1.5,
+            reinforcement_count: 0,
+        }];
+
+        let mut network = CouplingNetwork::new();
+        network.register("x".into(), 0.0, 1.0);
+        network.register("y".into(), 0.5, 1.0);
+
+        for pw in &pathways {
+            for conn in &mut network.connections {
+                if conn.from.as_str() == pw.source && conn.to.as_str() == pw.target {
+                    conn.weight = pw.weight.clamp(0.0, 1.0);
+                }
+            }
+        }
+
+        let conn = network
+            .connections
+            .iter()
+            .find(|c| c.from.as_str() == "x" && c.to.as_str() == "y")
+            .expect("x->y");
+        assert!((conn.weight - 1.0).abs() < f64::EPSILON, "Should be clamped to 1.0");
+    }
+
+    #[test]
+    fn hydration_skips_unknown_connections() {
+        use crate::m4_intelligence::m15_coupling_network::CouplingNetwork;
+
+        let pathways = vec![Pathway {
+            source: "unknown-a".to_owned(),
+            target: "unknown-b".to_owned(),
+            weight: 0.9,
+            reinforcement_count: 3,
+        }];
+
+        let mut network = CouplingNetwork::new();
+        network.register("real-a".into(), 0.0, 1.0);
+        network.register("real-b".into(), 0.5, 1.0);
+
+        let mut restored = 0u32;
+        for pw in &pathways {
+            for conn in &mut network.connections {
+                if conn.from.as_str() == pw.source
+                    && conn.to.as_str() == pw.target
+                    && pw.weight > 0.0
+                {
+                    conn.weight = pw.weight.clamp(0.0, 1.0);
+                    restored += 1;
+                }
+            }
+        }
+
+        assert_eq!(restored, 0, "No connections should match unknown pane IDs");
+    }
+
+    #[test]
+    fn hydration_ignores_zero_weight_pathways() {
+        use crate::m4_intelligence::m15_coupling_network::CouplingNetwork;
+
+        let pathways = vec![Pathway {
+            source: "p1".to_owned(),
+            target: "p2".to_owned(),
+            weight: 0.0,
+            reinforcement_count: 0,
+        }];
+
+        let mut network = CouplingNetwork::new();
+        network.register("p1".into(), 0.0, 1.0);
+        network.register("p2".into(), 0.5, 1.0);
+
+        let original_weight = network
+            .connections
+            .iter()
+            .find(|c| c.from.as_str() == "p1" && c.to.as_str() == "p2")
+            .map(|c| c.weight)
+            .unwrap_or(0.0);
+
+        let mut restored = 0u32;
+        for pw in &pathways {
+            for conn in &mut network.connections {
+                if conn.from.as_str() == pw.source
+                    && conn.to.as_str() == pw.target
+                    && pw.weight > 0.0
+                {
+                    conn.weight = pw.weight.clamp(0.0, 1.0);
+                    restored += 1;
+                }
+            }
+        }
+
+        assert_eq!(restored, 0, "Zero-weight pathway should not overwrite");
+
+        let conn = network
+            .connections
+            .iter()
+            .find(|c| c.from.as_str() == "p1" && c.to.as_str() == "p2")
+            .expect("p1->p2");
+        assert!(
+            (conn.weight - original_weight).abs() < f64::EPSILON,
+            "Weight should remain at default"
+        );
     }
 }

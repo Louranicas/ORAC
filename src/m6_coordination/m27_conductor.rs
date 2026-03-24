@@ -36,19 +36,11 @@ const MIN_SPHERES_FOR_BREATHING: usize = 3;
 // Conductor
 // ──────────────────────────────────────────────────────────────
 
-/// PI breathing controller for the Kuramoto field.
+/// P breathing controller for the Kuramoto field.
 ///
 /// The conductor modulates a recommended `k_delta` to steer the order parameter
 /// `r` toward a dynamic `r_target`. In ORAC this is an advisory controller —
 /// the authoritative `k_modulation` lives in the PV2 daemon.
-///
-/// # Design Note (BUG-L1-009)
-///
-/// Currently operates as a **P-only** controller. The `integral` field is
-/// reserved for future PI control but intentionally left at zero — in ORAC's
-/// advisory role, integral windup would fight PV2's authoritative K. The
-/// [`reset_integral`](Self::reset_integral) method exists for when PI mode is
-/// activated in a future phase.
 ///
 /// # Thread Safety
 /// `Conductor` is `Send + Sync` (no interior mutability).
@@ -58,8 +50,6 @@ pub struct Conductor {
     gain: f64,
     /// Fraction of emergent signal blended into output (0.0-1.0).
     breathing_blend: f64,
-    /// Integral accumulator — reserved for future PI mode, currently zero.
-    integral: f64,
 }
 
 impl Conductor {
@@ -69,7 +59,6 @@ impl Conductor {
         Self {
             gain: m04_constants::CONDUCTOR_GAIN,
             breathing_blend: m04_constants::EMERGENT_BLEND,
-            integral: 0.0,
         }
     }
 
@@ -81,7 +70,6 @@ impl Conductor {
         Self {
             gain: gain.clamp(0.01, 1.0),
             breathing_blend: breathing_blend.clamp(0.0, 1.0),
-            integral: 0.0,
         }
     }
 
@@ -101,7 +89,8 @@ impl Conductor {
 
         // 2. Base target depends on fleet size
         let n = state.spheres.len();
-        let n_f = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+        #[allow(clippy::cast_precision_loss)]
+        let n_f = n as f64;
         if n_f > m04_constants::LARGE_FLEET_THRESHOLD {
             m04_constants::R_TARGET_LARGE_FLEET
         } else {
@@ -188,10 +177,6 @@ impl Conductor {
         self.breathing_blend
     }
 
-    /// Reset the integral accumulator.
-    pub fn reset_integral(&mut self) {
-        self.integral = 0.0;
-    }
 }
 
 impl Default for Conductor {
@@ -486,14 +471,6 @@ mod tests {
         state.field.order.r = 0.995;
         let d2 = c.decide(&state);
         assert_eq!(d2.action, FieldAction::OverSynchronized);
-    }
-
-    #[test]
-    fn reset_integral_works() {
-        let mut c = Conductor::new();
-        c.integral = 0.5;
-        c.reset_integral();
-        assert!(c.integral.abs() < f64::EPSILON);
     }
 
     // ── decide_and_update ──

@@ -383,6 +383,14 @@ pub struct IpcConfig {
     pub task_ttl_secs: u64,
     /// Maximum cascade dispatches per minute.
     pub cascade_rate_limit: u32,
+    /// Event subscription patterns (default `["field.*", "sphere.*"]`).
+    #[serde(default = "default_subscribe_patterns")]
+    pub subscribe_patterns: Vec<String>,
+}
+
+/// Default IPC subscribe patterns.
+fn default_subscribe_patterns() -> Vec<String> {
+    vec!["field.*".into(), "sphere.*".into()]
 }
 
 impl Default for IpcConfig {
@@ -394,6 +402,7 @@ impl Default for IpcConfig {
             event_buffer_size: 256,
             task_ttl_secs: 3600,
             cascade_rate_limit: 10,
+            subscribe_patterns: default_subscribe_patterns(),
         }
     }
 }

@@ -340,6 +340,11 @@ pub fn route<S: std::hash::BuildHasher>(
             let mut total = DOMAIN_WEIGHT
                 .mul_add(domain_affinity, HEBBIAN_WEIGHT.mul_add(hebbian_weight, AVAILABILITY_WEIGHT * availability));
 
+            // NaN safety: non-finite scores default to zero
+            if !total.is_finite() {
+                total = 0.0;
+            }
+
             // Preferred bonus
             if let Some(ref preferred) = request.preferred {
                 if id == preferred {

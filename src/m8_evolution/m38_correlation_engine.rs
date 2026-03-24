@@ -271,6 +271,11 @@ impl CorrelationEngine {
     /// Ingest an event for correlation analysis.
     ///
     /// Returns the event ID and any correlations discovered with existing events.
+    ///
+    /// BUG-Gen19 fix: Also purges expired events (older than `window_ticks`
+    /// from the most recent event tick) on each ingestion call. Without this,
+    /// the buffer could grow to `max_buffer` with stale events that will never
+    /// produce correlations.
     pub fn ingest(
         &self,
         category: &str,
@@ -298,9 +303,11 @@ impl CorrelationEngine {
         // Find temporal correlations with recent events
         let corr_ids = self.find_temporal_correlations(&event);
 
-        // Buffer the event
+        // Buffer the event and purge expired
         {
             let mut events = self.events.write();
+            // BUG-Gen19: purge events outside the correlation window
+            Self::purge_expired_events(&mut events, tick, self.config.window_ticks);
             if events.len() >= self.config.max_buffer {
                 events.pop_front();
             }
@@ -310,6 +317,25 @@ impl CorrelationEngine {
         self.stats.write().total_events += 1;
 
         (event_id, corr_ids)
+    }
+
+    /// Purge events older than `window_ticks` from `reference_tick`.
+    ///
+    /// Events where `reference_tick - event.tick > window_ticks` are removed
+    /// from the front of the deque. Since events are appended in tick order,
+    /// we can stop at the first non-expired event.
+    fn purge_expired_events(
+        events: &mut VecDeque<CorrelationEvent>,
+        reference_tick: u64,
+        window_ticks: u64,
+    ) {
+        while let Some(front) = events.front() {
+            if reference_tick.saturating_sub(front.tick) > window_ticks {
+                events.pop_front();
+            } else {
+                break;
+            }
+        }
     }
 
     /// Ingest an emergence event specifically.
@@ -365,10 +391,14 @@ impl CorrelationEngine {
                 continue;
             }
 
-            // Temporal correlation: different events within window
-            #[allow(clippy::cast_precision_loss)] // tick_diff and window_ticks are small coordination values
+            // Temporal correlation: different events within window.
+            // BUG-061: Same-tick events (tick_diff=0) should not get
+            // maximum confidence — they likely come from the same tick
+            // cycle, not a causal chain. Use max(tick_diff, 1) to cap at ~0.97.
+            let effective_diff = tick_diff.max(1);
+            #[allow(clippy::cast_precision_loss)] // effective_diff and window_ticks are small coordination values
             let confidence =
-                1.0 - (tick_diff as f64 / self.config.window_ticks as f64);
+                1.0 - (effective_diff as f64 / (self.config.window_ticks as f64).max(1.0));
             if confidence < self.config.min_confidence {
                 continue;
             }
@@ -740,6 +770,9 @@ mod tests {
     fn event_buffer_bounded() {
         let config = CorrelationEngineConfig {
             max_buffer: 5,
+            // BUG-Gen19: use a large window so tick-based purging does not
+            // interfere with this test's intent (FIFO cap enforcement).
+            window_ticks: 10_000,
             ..Default::default()
         };
         let eng = CorrelationEngine::with_config(config);
@@ -972,5 +1005,72 @@ mod tests {
         let stats = eng.stats();
         assert_eq!(stats.by_type.get("causal"), Some(&2));
         assert_eq!(stats.by_type.get("fitness_linked"), Some(&1));
+    }
+
+    /// BUG-Gen19: Verify tick-based event purging during ingestion.
+    #[test]
+    fn ingest_purges_expired_events_by_tick() {
+        let config = CorrelationEngineConfig {
+            window_ticks: 10,
+            max_buffer: 10_000,
+            min_confidence: 0.0,
+            ..Default::default()
+        };
+        let eng = CorrelationEngine::with_config(config);
+
+        // Ingest 5 events at tick 0
+        for _ in 0..5 {
+            eng.ingest("test", "early", 1.0, 0, None);
+        }
+        assert_eq!(eng.event_count(), 5);
+
+        // Ingest 1 event at tick 5 — still within window
+        eng.ingest("test", "mid", 1.0, 5, None);
+        assert_eq!(eng.event_count(), 6);
+
+        // Ingest at tick 15 — tick 0 events are 15 ticks old > window(10)
+        eng.ingest("test", "late", 1.0, 15, None);
+        // The 5 events at tick=0 should have been purged (age 15 > 10)
+        // Only tick=5 and tick=15 events remain
+        assert_eq!(eng.event_count(), 2);
+    }
+
+    /// BUG-Gen19: Verify purge does not remove events within the window.
+    #[test]
+    fn ingest_preserves_events_within_window() {
+        let config = CorrelationEngineConfig {
+            window_ticks: 30,
+            max_buffer: 10_000,
+            min_confidence: 0.0,
+            ..Default::default()
+        };
+        let eng = CorrelationEngine::with_config(config);
+
+        // Events at ticks 10, 20, 30
+        eng.ingest("a", "type1", 1.0, 10, None);
+        eng.ingest("b", "type2", 1.0, 20, None);
+        eng.ingest("c", "type3", 1.0, 30, None);
+
+        // All within 30 ticks of tick=30
+        assert_eq!(eng.event_count(), 3);
+
+        // Ingest at tick 35 — tick 10 is now 25 ticks old, still <= 30
+        eng.ingest("d", "type4", 1.0, 35, None);
+        assert_eq!(eng.event_count(), 4);
+
+        // Ingest at tick 45 — tick 10 is 35 ticks old > 30, purged
+        eng.ingest("e", "type5", 1.0, 45, None);
+        // tick=10 purged, ticks 20,30,35,45 remain
+        assert_eq!(eng.event_count(), 4);
+    }
+
+    /// BUG-Gen19: Verify purge handles empty buffer gracefully.
+    #[test]
+    fn ingest_purge_empty_buffer() {
+        let eng = make_engine();
+        // First ingest into empty buffer should work fine
+        let (id, _) = eng.ingest("test", "first", 1.0, 100, None);
+        assert!(id > 0);
+        assert_eq!(eng.event_count(), 1);
     }
 }

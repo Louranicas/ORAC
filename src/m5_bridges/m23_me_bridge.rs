@@ -36,7 +36,7 @@ use crate::m1_core::m05_traits::Bridgeable;
 const ME_PORT: u16 = 8080;
 
 /// Default base URL for the Maintenance Engine.
-const DEFAULT_BASE_URL: &str = "localhost:8080";
+const DEFAULT_BASE_URL: &str = "127.0.0.1:8080";
 
 /// Health endpoint path.
 const HEALTH_PATH: &str = "/api/health";
@@ -51,7 +51,12 @@ const DEFAULT_POLL_INTERVAL: u64 = 12;
 const BUG_008_FROZEN_FITNESS: f64 = 0.3662;
 
 /// Tolerance for detecting frozen fitness values.
-const FROZEN_TOLERANCE: f64 = 0.001;
+///
+/// BUG-060b: Widened from 0.001 to 0.003. ME fitness oscillates between
+/// 0.609-0.627, and 0.001 tolerance triggered false frozen detections when
+/// fitness settled at 0.609 for 3 consecutive polls. 0.003 accommodates
+/// normal measurement noise while still detecting genuine plateaus.
+const FROZEN_TOLERANCE: f64 = 0.003;
 
 /// Number of identical polls before declaring fitness "frozen."
 const FROZEN_THRESHOLD: u32 = 3;
@@ -61,9 +66,12 @@ const FROZEN_THRESHOLD: u32 = 3;
 // ──────────────────────────────────────────────────────────────
 
 /// Response from the ME `/api/observer` endpoint.
+///
+/// The actual ME response nests fitness under `last_report.current_fitness`.
+/// We flatten it via `extract_fitness()` for bridge consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserverResponse {
-    /// Overall system fitness (0.0-1.0).
+    /// Overall system fitness (0.0-1.0), extracted from `last_report`.
     #[serde(default)]
     pub fitness: f64,
     /// Number of active layers in the ME.
@@ -72,9 +80,106 @@ pub struct ObserverResponse {
     /// Whether the ME event bus has active publishers.
     #[serde(default)]
     pub has_publishers: bool,
-    /// Observer status label.
+    /// Observer status label (maps from ME `system_state`).
     #[serde(default)]
     pub status: String,
+    /// Correlations found since last ME report.
+    #[serde(default)]
+    pub correlations_since: u64,
+    /// Emergences detected since last ME report.
+    #[serde(default)]
+    pub emergences_since: u64,
+    /// Total correlations found across all time.
+    #[serde(default)]
+    pub total_correlations: u64,
+    /// Total events ingested by the ME.
+    #[serde(default)]
+    pub total_events: u64,
+}
+
+/// Raw ME `/api/observer` response with nested `last_report`.
+#[derive(Debug, Clone, Deserialize)]
+struct RawObserverResponse {
+    /// Nested last report containing `current_fitness`.
+    #[serde(default)]
+    last_report: Option<RawLastReport>,
+    /// ME system state string (e.g. "Healthy", "Degraded").
+    #[serde(default)]
+    system_state: Option<String>,
+    /// Whether the observer is enabled.
+    #[serde(default)]
+    enabled: bool,
+    /// ME metrics (correlations, emergences, events).
+    #[serde(default)]
+    metrics: Option<RawMetrics>,
+}
+
+/// Nested report within the raw ME observer response.
+#[derive(Debug, Clone, Deserialize)]
+struct RawLastReport {
+    /// Current fitness score.
+    #[serde(default)]
+    current_fitness: f64,
+    /// Correlations found since last report.
+    #[serde(default)]
+    correlations_since_last: u64,
+    /// Emergences detected since last report.
+    #[serde(default)]
+    emergences_since_last: u64,
+}
+
+/// Nested metrics block within the raw ME observer response.
+///
+/// All fields are deserialized from ME JSON but only a subset are forwarded
+/// to `ObserverResponse`. Serde needs the fields present for structural matching.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
+struct RawMetrics {
+    /// Total correlations found across all time.
+    #[serde(default)]
+    correlations_found: u64,
+    /// Total emergences detected across all time.
+    #[serde(default)]
+    emergences_detected: u64,
+    /// Total events ingested by the ME.
+    #[serde(default)]
+    events_ingested: u64,
+}
+
+impl RawObserverResponse {
+    /// Convert the raw response into the bridge-friendly `ObserverResponse`.
+    fn into_observer(self) -> ObserverResponse {
+        let fitness = self
+            .last_report
+            .as_ref()
+            .map_or(0.0, |r| r.current_fitness);
+        let correlations_since = self
+            .last_report
+            .as_ref()
+            .map_or(0, |r| r.correlations_since_last);
+        let emergences_since = self
+            .last_report
+            .as_ref()
+            .map_or(0, |r| r.emergences_since_last);
+        let total_correlations = self
+            .metrics
+            .as_ref()
+            .map_or(0, |m| m.correlations_found);
+        let total_events = self
+            .metrics
+            .as_ref()
+            .map_or(0, |m| m.events_ingested);
+        ObserverResponse {
+            fitness,
+            active_layers: 0,
+            has_publishers: self.enabled,
+            status: self.system_state.unwrap_or_default(),
+            correlations_since,
+            emergences_since,
+            total_correlations,
+            total_events,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -100,6 +205,8 @@ struct BridgeState {
     is_frozen: bool,
     /// Last full observer response.
     last_response: Option<ObserverResponse>,
+    /// Successful poll count (observer subscription proxy).
+    successful_polls: u64,
 }
 
 impl Default for BridgeState {
@@ -113,6 +220,7 @@ impl Default for BridgeState {
             frozen_count: 0,
             is_frozen: false,
             last_response: None,
+            successful_polls: 0,
         }
     }
 }
@@ -150,11 +258,20 @@ impl MeBridge {
     }
 
     /// Create a new ME bridge with custom configuration.
+    ///
+    /// Protocol prefixes (`http://`, `https://`) are stripped automatically
+    /// because the bridge uses raw TCP sockets, not an HTTP client (BUG-033).
     #[must_use]
     pub fn with_config(base_url: impl Into<String>, poll_interval: u64) -> Self {
+        let raw: String = base_url.into();
+        let stripped = raw
+            .strip_prefix("http://")
+            .or_else(|| raw.strip_prefix("https://"))
+            .unwrap_or(&raw)
+            .to_owned();
         Self {
             service: "me".to_owned(),
-            base_url: base_url.into(),
+            base_url: stripped,
             poll_interval: poll_interval.max(1),
             state: RwLock::new(BridgeState::default()),
         }
@@ -188,6 +305,18 @@ impl MeBridge {
     #[must_use]
     pub fn is_frozen(&self) -> bool {
         self.state.read().is_frozen
+    }
+
+    /// Return whether ME observer is actively subscribed (at least one successful poll).
+    #[must_use]
+    pub fn is_subscribed(&self) -> bool {
+        self.state.read().successful_polls > 0
+    }
+
+    /// Return the number of successful observer polls.
+    #[must_use]
+    pub fn successful_polls(&self) -> u64 {
+        self.state.read().successful_polls
     }
 
     /// Return the last poll tick.
@@ -233,11 +362,14 @@ impl MeBridge {
     /// Returns `PvError::BridgeUnreachable` or `PvError::BridgeParse` on failure.
     pub fn poll_observer(&self) -> PvResult<f64> {
         let body = raw_http_get(&self.base_url, OBSERVER_PATH, &self.service)?;
-        let response: ObserverResponse =
+
+        // Parse raw ME response (nested last_report.current_fitness)
+        let raw: RawObserverResponse =
             serde_json::from_str(&body).map_err(|e| PvError::BridgeParse {
                 service: self.service.clone(),
                 reason: format!("observer parse: {e}"),
             })?;
+        let response = raw.into_observer();
 
         let fitness = if response.fitness.is_finite() {
             response.fitness.clamp(0.0, 1.0)
@@ -264,6 +396,7 @@ impl MeBridge {
         state.last_response = Some(response);
         state.consecutive_failures = 0;
         state.stale = false;
+        state.successful_polls = state.successful_polls.saturating_add(1);
 
         // If frozen, return neutral adjustment
         let adj = if state.is_frozen {
@@ -289,9 +422,16 @@ impl MeBridge {
     }
 
     /// Check whether a poll is due at the given tick.
+    ///
+    /// BUG-SCAN-003 fix: force immediate first poll when `last_poll_tick == 0`
+    /// and data is stale, matching `SynthexBridge` behaviour. Without this,
+    /// the first ME poll waits a full `poll_interval` (12 ticks / 60s).
     #[must_use]
     pub fn should_poll(&self, current_tick: u64) -> bool {
         let state = self.state.read();
+        if state.last_poll_tick == 0 && state.stale {
+            return true;
+        }
         current_tick.saturating_sub(state.last_poll_tick) >= self.poll_interval
     }
 }
@@ -655,6 +795,10 @@ mod tests {
             active_layers: 5,
             has_publishers: false,
             status: "degraded".to_owned(),
+            correlations_since: 100,
+            emergences_since: 2,
+            total_correlations: 4_000_000,
+            total_events: 368_000,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let back: ObserverResponse = serde_json::from_str(&json).unwrap();
@@ -755,5 +899,26 @@ mod tests {
     fn frozen_tolerance_is_small() {
         assert!(FROZEN_TOLERANCE > 0.0);
         assert!(FROZEN_TOLERANCE < 0.01);
+    }
+
+    // ── Observer subscription ──
+
+    #[test]
+    fn not_subscribed_before_first_poll() {
+        let bridge = MeBridge::new();
+        assert!(!bridge.is_subscribed());
+        assert_eq!(bridge.successful_polls(), 0);
+    }
+
+    #[test]
+    fn subscribed_after_successful_poll_counter_increments() {
+        let bridge = MeBridge::new();
+        // Simulate a successful poll by writing to state directly
+        {
+            let mut state = bridge.state.write();
+            state.successful_polls = 1;
+        }
+        assert!(bridge.is_subscribed());
+        assert_eq!(bridge.successful_polls(), 1);
     }
 }

@@ -34,7 +34,7 @@ use super::http_helpers::extract_body;
 const SYNTHEX_PORT: u16 = 8090;
 
 /// Default base URL for SYNTHEX.
-const DEFAULT_BASE_URL: &str = "localhost:8090";
+const DEFAULT_BASE_URL: &str = "127.0.0.1:8090";
 
 /// Health endpoint path.
 const HEALTH_PATH: &str = "/api/health";
@@ -86,8 +86,14 @@ impl ThermalResponse {
     ///
     /// V1 pattern: `(1.0 - deviation * 0.2).clamp(0.8, 1.2)`
     /// Cold → boost coupling (>1.0), hot → reduce coupling (<1.0).
+    ///
+    /// BUG-H001 fix: validates inputs are finite before computation.
+    /// Returns neutral 1.0 if temperature or target is NaN/INF.
     #[must_use]
     pub fn thermal_adjustment(&self) -> f64 {
+        if !self.temperature.is_finite() || !self.target.is_finite() {
+            return 1.0;
+        }
         let deviation = self.temperature - self.target;
         deviation.mul_add(-0.2, 1.0).clamp(
             m04_constants::K_MOD_BUDGET_MIN,
@@ -160,11 +166,20 @@ impl SynthexBridge {
     }
 
     /// Create a new SYNTHEX bridge with a custom base URL and poll interval.
+    ///
+    /// Protocol prefixes (`http://`, `https://`) are stripped automatically
+    /// because the bridge uses raw TCP sockets, not an HTTP client (BUG-033).
     #[must_use]
     pub fn with_config(base_url: impl Into<String>, poll_interval: u64) -> Self {
+        let raw: String = base_url.into();
+        let stripped = raw
+            .strip_prefix("http://")
+            .or_else(|| raw.strip_prefix("https://"))
+            .unwrap_or(&raw)
+            .to_owned();
         Self {
             service: "synthex".to_owned(),
-            base_url: base_url.into(),
+            base_url: stripped,
             poll_interval: poll_interval.max(1),
             state: RwLock::new(BridgeState::default()),
         }
@@ -247,12 +262,14 @@ impl SynthexBridge {
         Ok(clamped)
     }
 
-    /// Post field state to the SYNTHEX ingest endpoint (fire-and-forget).
+    /// Post field state to the SYNTHEX ingest endpoint.
     ///
     /// # Errors
     /// Returns `PvError::BridgeUnreachable` if TCP connection fails.
+    /// Returns `PvError::BridgeError` if SYNTHEX responds with 4xx/5xx.
     pub fn post_field_state(&self, payload: &[u8]) -> PvResult<()> {
-        raw_http_post(&self.base_url, INGEST_PATH, payload, &self.service)
+        raw_http_post(&self.base_url, INGEST_PATH, payload, &self.service)?;
+        Ok(())
     }
 
     /// Record a poll failure, incrementing the consecutive failure counter.
@@ -268,9 +285,15 @@ impl SynthexBridge {
     }
 
     /// Check whether a poll is due at the given tick.
+    ///
+    /// BUG-M002 fix: forces immediate poll when `last_poll_tick` is 0
+    /// (initial state), avoiding a one-interval startup delay.
     #[must_use]
     pub fn should_poll(&self, current_tick: u64) -> bool {
         let state = self.state.read();
+        if state.last_poll_tick == 0 && state.stale {
+            return true; // Force immediate first poll
+        }
         current_tick.saturating_sub(state.last_poll_tick) >= self.poll_interval
     }
 }
@@ -565,6 +588,28 @@ mod tests {
     fn thermal_adjustment_at_target_is_neutral() {
         let resp = ThermalResponse {
             temperature: 0.5, target: 0.5, pid_output: 0.0, heat_sources: vec![],
+        };
+        assert!((resp.thermal_adjustment() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn thermal_adjustment_nan_returns_neutral() {
+        let resp = ThermalResponse {
+            temperature: f64::NAN,
+            target: 0.5,
+            pid_output: 0.0,
+            heat_sources: vec![],
+        };
+        assert!((resp.thermal_adjustment() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn thermal_adjustment_inf_returns_neutral() {
+        let resp = ThermalResponse {
+            temperature: 0.5,
+            target: f64::INFINITY,
+            pid_output: 0.0,
+            heat_sources: vec![],
         };
         assert!((resp.thermal_adjustment() - 1.0).abs() < f64::EPSILON);
     }

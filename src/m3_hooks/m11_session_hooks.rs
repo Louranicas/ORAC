@@ -88,16 +88,19 @@ pub async fn handle_session_start(
         #[allow(clippy::cast_precision_loss)]
         let now = super::m10_hook_server::epoch_ms() as f64 / 1000.0;
 
-        let _ = bb.upsert_pane(&PaneRecord {
+        // BUG-057c fix: log blackboard upsert errors instead of silently discarding
+        if let Err(e) = bb.upsert_pane(&PaneRecord {
             pane_id: pane_id.clone(),
             status: PaneStatus::Idle,
             persona: "orac-agent".into(),
             updated_at: now,
             phase: 0.0,
             tasks_completed: 0,
-        });
+        }) {
+            tracing::warn!(pane = %pane_id, "blackboard upsert_pane (SessionStart) failed: {e}");
+        }
 
-        let _ = bb.upsert_card(&AgentCard {
+        if let Err(e) = bb.upsert_card(&AgentCard {
             pane_id,
             capabilities: vec![
                 "read".into(),
@@ -108,12 +111,19 @@ pub async fn handle_session_start(
             domain: "general".into(),
             model: "claude-opus-4-6".into(),
             registered_at: now,
-        });
+        }) {
+            tracing::warn!("blackboard upsert_card (SessionStart) failed: {e}");
+        }
     }
 
-    let message = format!(
-        "[HABITAT] Hydrated: POVM {povm_memories} memories, {povm_pathways} pathways | RM {rm_count} discoveries",
-    );
+    // BUG-057d fix: distinguish "consent denied" from "empty response"
+    let message = if hydration_allowed {
+        format!(
+            "[HABITAT] Hydrated: POVM {povm_memories} memories, {povm_pathways} pathways | RM {rm_count} discoveries",
+        )
+    } else {
+        "[HABITAT] Hydration skipped (consent denied)".to_owned()
+    };
 
     Json(HookResponse::with_message(message))
 }
@@ -174,7 +184,9 @@ pub async fn handle_stop(
         tracing::info!("Consent: povm_write denied for {}", pane_id_str);
     }
 
-    // Consent + breaker-gated: RM crystallize
+    // T6 fix: Await RM crystallize instead of fire-and-forget.
+    // Process may exit before spawned task completes (handle_stop race condition).
+    // Uses 3-second timeout cap within the 5-second hook budget (Gap SA3 verified).
     #[cfg(feature = "intelligence")]
     if state.consent_allows(&pane_id_str, "rm_write") && state.breaker_allows("rm") {
         let rm_put_url = format!("{}/put", state.rm_url);
@@ -182,7 +194,7 @@ pub async fn handle_stop(
             "session\t{pane_id_str}\tsession-end\t3600\tsession-end r={r_value}"
         );
         let rm_state = Arc::clone(&state);
-        tokio::spawn(async move {
+        let rm_handle = tokio::spawn(async move {
             let ok = tokio::task::spawn_blocking(move || {
                 ureq::post(&rm_put_url)
                     .timeout(std::time::Duration::from_millis(2000))
@@ -197,6 +209,11 @@ pub async fn handle_stop(
                 rm_state.breaker_failure("rm");
             }
         });
+        // Await with 3-second safety cap
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            rm_handle,
+        ).await;
     } else if !state.consent_allows(&pane_id_str, "rm_write") {
         tracing::info!("Consent: rm_write denied for {}", pane_id_str);
     } else {
@@ -227,21 +244,25 @@ pub async fn handle_stop(
                 #[allow(clippy::cast_precision_loss)]
                 let duration_secs = t.active_task_claimed_ms
                     .map_or(0.0, |c| now_ms.saturating_sub(c) as f64 / 1000.0);
-                let _ = bb.insert_task(&TaskRecord {
+                if let Err(e) = bb.insert_task(&TaskRecord {
                     task_id: task_id.clone(),
                     pane_id: pid.clone(),
                     description: "session terminated".into(),
                     outcome: "failed".into(),
                     finished_at: now,
                     duration_secs,
-                });
+                }) {
+                    tracing::warn!(pane = %pane_id_str, "blackboard insert_task (Stop) failed: {e}");
+                }
             }
         }
 
         if let Ok(Some(mut pane)) = bb.get_pane(&pid) {
             pane.status = PaneStatus::Complete;
             pane.updated_at = now;
-            let _ = bb.upsert_pane(&pane);
+            if let Err(e) = bb.upsert_pane(&pane) {
+                tracing::warn!(pane = %pane_id_str, "blackboard upsert_pane (Stop/Complete) failed: {e}");
+            }
         }
     }
 

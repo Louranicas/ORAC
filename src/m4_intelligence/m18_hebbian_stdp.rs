@@ -54,6 +54,14 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
         .filter(|(_, s)| s.status == PaneStatus::Working)
         .collect();
 
+    // G1 anti-saturation: Skip STDP when fewer than 2 spheres are Working.
+    // With <2 co-active peers, every connection gets LTD (weakening) and
+    // none get LTP (strengthening), driving 99%+ of weights to the floor.
+    // This guard preserves weight differentiation for meaningful learning.
+    if working.len() < 2 {
+        return result;
+    }
+
     // Collect connection updates to avoid borrow conflicts
     let updates: Vec<(PaneId, PaneId, f64)> = network
         .connections
@@ -67,8 +75,10 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
                 return None;
             }
 
-            let both_working =
-                working.contains_key(&conn.from) && working.contains_key(&conn.to);
+            let from_working = working.contains_key(&conn.from);
+            let to_working = working.contains_key(&conn.to);
+            let both_working = from_working && to_working;
+            let either_working = from_working || to_working;
 
             let weight_delta = if both_working {
                 // LTP: co-active pair
@@ -87,12 +97,26 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
                 }
 
                 ltp
-            } else {
-                // LTD: non-co-active
+            } else if either_working {
+                // LTD: one active, one idle — active depression
                 -m04_constants::HEBBIAN_LTD
+            } else {
+                // G2 idle-idle skip: both endpoints idle — no STDP update.
+                // Prevents 98%+ saturation at floor when few spheres are working
+                // by only depressing connections with at least one active endpoint.
+                return None;
             };
 
-            let new_weight = (conn.weight + weight_delta)
+            // BUG-060e: Homeostatic decay prevents weight saturation at ceiling/floor.
+            // Without this, LTP connections hit 1.0 and LTD connections hit 0.15,
+            // producing zero delta and permanently stalling STDP learning.
+            // Pull weight toward midpoint (0.5) by 0.5% per cycle — enough to
+            // prevent saturation while preserving learned weight differentiation.
+            let homeostatic_target = 0.5;
+            let homeostatic_rate = 0.005;
+            let homeostatic_pull = (homeostatic_target - conn.weight) * homeostatic_rate;
+
+            let new_weight = (conn.weight + weight_delta + homeostatic_pull)
                 .clamp(m04_constants::HEBBIAN_WEIGHT_FLOOR, 1.0);
 
             Some((conn.from.clone(), conn.to.clone(), new_weight))
@@ -212,6 +236,20 @@ mod tests {
         (net, spheres)
     }
 
+    /// Setup with 2 working + 1 idle — passes the anti-saturation guard
+    /// while still having a non-coactive connection (working→idle) for LTD.
+    fn setup_mixed_above_guard() -> (CouplingNetwork, HashMap<PaneId, PaneSphere>) {
+        let mut net = CouplingNetwork::new();
+        net.register(pid("a"), 0.0, 0.1);
+        net.register(pid("b"), 1.0, 0.1);
+        net.register(pid("c"), 2.0, 0.1);
+        let mut spheres = HashMap::new();
+        spheres.insert(pid("a"), working_sphere("a"));
+        spheres.insert(pid("b"), working_sphere("b"));
+        spheres.insert(pid("c"), idle_sphere("c"));
+        (net, spheres)
+    }
+
     // ── apply_stdp: co-active LTP ──
 
     #[test]
@@ -246,30 +284,45 @@ mod tests {
 
     #[test]
     fn stdp_non_coactive_decreases_weight() {
-        let (mut net, spheres) = setup_mixed();
-        let before = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        // Use setup with 2 working + 1 idle so guard passes;
+        // the connection from working→idle should get LTD.
+        let (mut net, spheres) = setup_mixed_above_guard();
+        let before = net.get_weight(&pid("a"), &pid("c")).unwrap();
         apply_stdp(&mut net, &spheres);
-        let after = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        let after = net.get_weight(&pid("a"), &pid("c")).unwrap();
         assert!(after <= before, "LTD should decrease or maintain weight");
     }
 
     #[test]
     fn stdp_non_coactive_ltd_count() {
-        let (mut net, spheres) = setup_mixed();
+        let (mut net, spheres) = setup_mixed_above_guard();
         let result = apply_stdp(&mut net, &spheres);
         assert!(result.ltd_count > 0);
+    }
+
+    #[test]
+    fn stdp_guard_skips_with_single_working() {
+        // G1 anti-saturation: with only 1 working sphere, STDP returns early.
+        let (mut net, spheres) = setup_mixed();
+        let before = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        let result = apply_stdp(&mut net, &spheres);
+        let after = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        assert_eq!(result.ltp_count, 0, "no LTP with <2 working");
+        assert_eq!(result.ltd_count, 0, "no LTD with <2 working");
+        assert_relative_eq!(before, after, epsilon = 1e-10);
     }
 
     // ── Weight floor ──
 
     #[test]
     fn stdp_respects_weight_floor() {
-        let (mut net, spheres) = setup_mixed();
-        // Apply LTD many times
+        // Use setup with >=2 working so the guard passes and LTD fires.
+        let (mut net, spheres) = setup_mixed_above_guard();
+        // Apply LTD many times on the working→idle connection
         for _ in 0..1000 {
             apply_stdp(&mut net, &spheres);
         }
-        let w = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        let w = net.get_weight(&pid("a"), &pid("c")).unwrap();
         assert!(
             w >= m04_constants::HEBBIAN_WEIGHT_FLOOR - 1e-10,
             "weight should not go below floor"
@@ -543,11 +596,13 @@ mod tests {
 
     #[test]
     fn stdp_multiple_cycles_ltd_converge_to_floor() {
-        let (mut net, spheres) = setup_mixed();
+        // Use setup with >=2 working so the guard passes and LTD fires
+        // on the working→idle connection.
+        let (mut net, spheres) = setup_mixed_above_guard();
         for _ in 0..10000 {
             apply_stdp(&mut net, &spheres);
         }
-        let w = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        let w = net.get_weight(&pid("a"), &pid("c")).unwrap();
         assert_relative_eq!(w, m04_constants::HEBBIAN_WEIGHT_FLOOR, epsilon = 0.01);
     }
 }

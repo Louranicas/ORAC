@@ -296,6 +296,9 @@ impl FieldDashboard {
     #[must_use]
     pub fn r_stddev(&self) -> f64 {
         let state = self.state.read();
+        if state.r_history.is_empty() {
+            return 0.0;
+        }
         let n = state.r_history.len();
         if n < 2 {
             return 0.0;
@@ -878,5 +881,63 @@ mod tests {
         assert_eq!(snap.r_history.len(), 2);
         assert!((snap.r_history[0] - 0.8).abs() < 1e-6);
         assert!((snap.r_history[1] - 0.9).abs() < 1e-6);
+    }
+
+    /// BUG-Gen21: Verify `r_trend()` computes the correct slope for known
+    /// linear ascending data. For r = 0.5, 0.6, 0.7, 0.8, 0.9
+    /// (step +0.1 per tick), the slope should be exactly 0.1.
+    #[test]
+    fn r_trend_ascending_exact_slope() {
+        let d = FieldDashboard::new();
+        for i in 0..5_u64 {
+            let r = 0.5 + 0.1 * f64::from(i as u32);
+            d.update_tick(i, &OrderParameter::new(r, 0.0), 1.0);
+        }
+        let slope = d.r_trend();
+        assert!(
+            (slope - 0.1).abs() < 1e-10,
+            "expected slope ~0.1, got {slope}"
+        );
+    }
+
+    /// BUG-Gen21: Verify `r_trend()` computes the correct slope for known
+    /// linear descending data. For r = 1.0, 0.8, 0.6, 0.4, 0.2
+    /// (step -0.2 per tick), the slope should be exactly -0.2.
+    #[test]
+    fn r_trend_descending_exact_slope() {
+        let d = FieldDashboard::new();
+        for i in 0..5_u64 {
+            let r = 1.0 - 0.2 * f64::from(i as u32);
+            d.update_tick(i, &OrderParameter::new(r, 0.0), 1.0);
+        }
+        let slope = d.r_trend();
+        assert!(
+            (slope - (-0.2)).abs() < 1e-10,
+            "expected slope ~-0.2, got {slope}"
+        );
+    }
+
+    /// BUG-Gen21: Verify oldest-first ordering in the ring buffer after wrap.
+    /// After filling past `R_HISTORY_MAX`, the oldest entry should be evicted
+    /// and the trend should reflect only the retained window.
+    #[test]
+    fn r_trend_correct_after_ring_wrap() {
+        let d = FieldDashboard::new();
+        // Fill buffer with flat 0.5, then insert rising values
+        let max = u64::try_from(R_HISTORY_MAX).unwrap_or(60);
+        for i in 0..max {
+            d.update_tick(i, &OrderParameter::new(0.5, 0.0), 1.0);
+        }
+        // Trend should be flat
+        assert!(d.r_trend().abs() < 1e-10);
+
+        // Now push 10 more values that are rising
+        for i in 0..10_u64 {
+            let r = 0.5 + 0.01 * f64::from(i as u32);
+            d.update_tick(max + i, &OrderParameter::new(r, 0.0), 1.0);
+        }
+        // Buffer now has (R_HISTORY_MAX - 10) flat values at 0.5
+        // followed by 10 rising values. Overall trend should be positive.
+        assert!(d.r_trend() > 0.0);
     }
 }

@@ -165,6 +165,8 @@ pub enum RejectionReason {
     NoParameters,
     /// All parameters are on target.
     AllOnTarget,
+    /// All candidates are blocked by cooldown or diversity, but NOT on target.
+    AllBlocked,
 }
 
 impl fmt::Display for RejectionReason {
@@ -178,6 +180,7 @@ impl fmt::Display for RejectionReason {
             }
             Self::NoParameters => f.write_str("no parameters registered"),
             Self::AllOnTarget => f.write_str("all parameters are on target"),
+            Self::AllBlocked => f.write_str("all candidates blocked by cooldown or diversity"),
         }
     }
 }
@@ -360,7 +363,9 @@ impl MutationSelector {
     ///
     /// # Errors
     /// Returns [`RejectionReason::NoParameters`] if no parameters are registered,
-    /// or [`RejectionReason::AllOnTarget`] if all parameters are within target tolerance.
+    /// [`RejectionReason::AllOnTarget`] if all parameters are within target tolerance,
+    /// or [`RejectionReason::AllBlocked`] if all off-target candidates are blocked
+    /// by cooldown or diversity enforcement.
     pub fn select(&self, generation: u64) -> Result<MutationProposal, RejectionReason> {
         self.stats.write().total_attempts += 1;
 
@@ -372,6 +377,10 @@ impl MutationSelector {
 
         let param_count = params.len();
         let idx = *self.round_robin_idx.read();
+
+        // Track whether any candidate was skipped due to cooldown/diversity
+        // (as opposed to being on-target) so we can distinguish the rejection reason.
+        let mut any_blocked = false;
 
         // Try each parameter starting from round-robin position
         for attempt in 0..param_count {
@@ -385,11 +394,13 @@ impl MutationSelector {
 
             // Check cooldown
             if self.check_cooldown(&candidate.name, generation).is_some() {
+                any_blocked = true;
                 continue;
             }
 
             // Check diversity gate
             if self.check_diversity(&candidate.name).is_some() {
+                any_blocked = true;
                 continue;
             }
 
@@ -415,7 +426,11 @@ impl MutationSelector {
         // Advance round-robin even on failure
         *self.round_robin_idx.write() = (idx + 1) % param_count;
 
-        Err(RejectionReason::AllOnTarget)
+        if any_blocked {
+            Err(RejectionReason::AllBlocked)
+        } else {
+            Err(RejectionReason::AllOnTarget)
+        }
     }
 
     /// Check if a parameter is on cooldown.
@@ -974,6 +989,96 @@ mod tests {
 
         let r = RejectionReason::NoParameters;
         assert!(r.to_string().contains("no parameters"));
+    }
+
+    #[test]
+    fn all_blocked_not_all_on_target() {
+        // Single parameter off-target, but on cooldown → should return AllBlocked, NOT AllOnTarget
+        let config = MutationSelectorConfig {
+            cooldown_generations: 10,
+            diversity_threshold: 1.0, // disable diversity for this test
+            ..Default::default()
+        };
+        let sel = MutationSelector::with_config(config);
+        sel.register_parameter(MutableParameter::new(
+            "blocked_param", 1.0, 0.0, 2.0, 0.5, "off target but will be on cooldown",
+        )).unwrap();
+
+        // First select succeeds (places on cooldown)
+        let first = sel.select(1);
+        assert!(first.is_ok());
+
+        // Second select within cooldown → AllBlocked
+        let second = sel.select(2);
+        assert!(second.is_err());
+        assert!(matches!(second.unwrap_err(), RejectionReason::AllBlocked));
+    }
+
+    #[test]
+    fn all_on_target_still_returns_all_on_target() {
+        let sel = make_selector();
+        sel.register_parameter(MutableParameter::new(
+            "on_target", 0.5, 0.0, 1.0, 0.5, "exactly on target",
+        )).unwrap();
+        let result = sel.select(1);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), RejectionReason::AllOnTarget));
+    }
+
+    #[test]
+    fn all_blocked_display() {
+        let r = RejectionReason::AllBlocked;
+        assert!(r.to_string().contains("blocked"));
+    }
+
+    #[test]
+    fn mixed_on_target_and_blocked_returns_all_blocked() {
+        // Two params: one on-target, one off-target but on cooldown → AllBlocked
+        let config = MutationSelectorConfig {
+            cooldown_generations: 10,
+            diversity_threshold: 1.0,
+            ..Default::default()
+        };
+        let sel = MutationSelector::with_config(config);
+        sel.register_parameter(MutableParameter::new(
+            "on_target", 0.5, 0.0, 1.0, 0.5, "on target",
+        )).unwrap();
+        sel.register_parameter(MutableParameter::new(
+            "off_target", 1.0, 0.0, 2.0, 0.5, "off target",
+        )).unwrap();
+
+        // Select the off-target param, placing it on cooldown
+        let first = sel.select(1);
+        assert!(first.is_ok());
+
+        // Now: on_target skipped (on target), off_target skipped (cooldown) → AllBlocked
+        let second = sel.select(2);
+        assert!(second.is_err());
+        assert!(matches!(second.unwrap_err(), RejectionReason::AllBlocked));
+    }
+
+    #[test]
+    fn diversity_blocked_returns_all_blocked() {
+        // Single param off-target, blocked by diversity gate → AllBlocked
+        let config = MutationSelectorConfig {
+            cooldown_generations: 0, // disable cooldown
+            diversity_window: 2,
+            diversity_threshold: 0.4, // low threshold
+            ..Default::default()
+        };
+        let sel = MutationSelector::with_config(config);
+        sel.register_parameter(MutableParameter::new(
+            "param_a", 1.0, 0.0, 2.0, 0.5, "off target",
+        )).unwrap();
+
+        // First select succeeds
+        let first = sel.select(0);
+        assert!(first.is_ok());
+
+        // Second select — diversity gate blocks (1/1 > 0.4)
+        let second = sel.select(1);
+        assert!(second.is_err());
+        assert!(matches!(second.unwrap_err(), RejectionReason::AllBlocked));
     }
 
     #[test]

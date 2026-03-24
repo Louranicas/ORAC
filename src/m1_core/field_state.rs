@@ -17,6 +17,16 @@ use super::m01_core_types::{
 };
 use super::m04_constants;
 
+/// Phase proximity threshold for cluster grouping (pi/6 radians = 30 degrees).
+const CLUSTER_PROXIMITY: f64 = std::f64::consts::FRAC_PI_6;
+
+/// Minimum phase gap between clusters to indicate chimera state (pi/3 radians).
+const CHIMERA_GAP: f64 = std::f64::consts::FRAC_PI_3;
+
+/// Global `r` threshold below which chimera detection is enabled.
+/// When `r >= 0.95` the field is nearly synchronized — no chimera possible.
+const CHIMERA_R_THRESHOLD: f64 = 0.95;
+
 // ──────────────────────────────────────────────────────────────
 // Harmonics — sub-cluster analysis
 // ──────────────────────────────────────────────────────────────
@@ -69,10 +79,17 @@ impl FieldState {
         let (sin_sum, cos_sum) = spheres.values().fold((0.0_f64, 0.0_f64), |(s, c), sp| {
             (s + sp.phase.sin(), c + sp.phase.cos())
         });
-        // BUG-L1-010: n is always ≤ SPHERE_CAP (200), so cast is lossless
+        // BUG-L1-010: n is always ≤ SPHERE_CAP (200), so cast is lossless.
+        // BUG-M004 fix: explicit guard + debug_assert prevents division by zero
+        // if the early return above is ever removed during refactoring.
+        debug_assert!(n > 0, "compute called with empty spheres (early return should have triggered)");
         #[allow(clippy::cast_precision_loss)]
         let count = n as f64;
-        let r = sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / count;
+        let r = if count > 0.0 {
+            sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / count
+        } else {
+            0.0
+        };
         let psi = sin_sum.atan2(cos_sum);
 
         let order = OrderParameter {
@@ -80,13 +97,118 @@ impl FieldState {
             psi,
         };
 
+        let harmonics = Self::compute_harmonics(spheres, &order);
+
         Self {
             order,
             tick,
             fleet_mode: FleetMode::from_count(n),
             r_trend: RTrend::default(),
             recent_decisions: Vec::new(),
-            harmonics: Harmonics::default(),
+            harmonics,
+        }
+    }
+
+    /// Compute harmonic decomposition by clustering spheres by phase proximity.
+    ///
+    /// Groups spheres whose phases are within [`CLUSTER_PROXIMITY`] (pi/6) of
+    /// each other, computes a per-cluster order parameter, and detects chimera
+    /// states (2+ clusters with gap > pi/3 while global `r` < 0.95).
+    fn compute_harmonics(
+        spheres: &HashMap<PaneId, PaneSphere>,
+        global_order: &OrderParameter,
+    ) -> Harmonics {
+        if spheres.is_empty() {
+            return Harmonics::default();
+        }
+
+        // Collect and sort phases (wrapped to [0, 2pi))
+        let mut phases: Vec<f64> = spheres
+            .values()
+            .map(|sp| sp.phase.rem_euclid(std::f64::consts::TAU))
+            .collect();
+        phases.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Greedy cluster assignment: walk sorted phases, start new cluster
+        // when angular distance exceeds CLUSTER_PROXIMITY.
+        let mut clusters: Vec<Vec<f64>> = Vec::new();
+        let mut current_cluster: Vec<f64> = vec![phases[0]];
+
+        for &phase in &phases[1..] {
+            let last = current_cluster.last().copied().unwrap_or(0.0);
+            let gap = phase - last;
+            if gap <= CLUSTER_PROXIMITY {
+                current_cluster.push(phase);
+            } else {
+                clusters.push(std::mem::take(&mut current_cluster));
+                current_cluster = vec![phase];
+            }
+        }
+        clusters.push(current_cluster);
+
+        // Check wrap-around: if the gap between the last phase and the first
+        // phase (modulo 2pi) is within proximity, merge the first and last clusters.
+        if clusters.len() >= 2 {
+            let last_cluster_last = clusters.last().and_then(|c| c.last().copied()).unwrap_or(0.0);
+            let first_cluster_first = clusters.first().and_then(|c| c.first().copied()).unwrap_or(0.0);
+            let wrap_gap = (first_cluster_first + std::f64::consts::TAU) - last_cluster_last;
+            if wrap_gap <= CLUSTER_PROXIMITY {
+                let first = clusters.remove(0);
+                if let Some(last) = clusters.last_mut() {
+                    last.extend(first);
+                }
+            }
+        }
+
+        // Compute per-cluster order parameter
+        let cluster_orders: Vec<OrderParameter> = clusters
+            .iter()
+            .map(|cluster| {
+                #[allow(clippy::cast_precision_loss)] // cluster sizes are small
+                let n = cluster.len() as f64;
+                if n < 1.0 {
+                    return OrderParameter::new(0.0, 0.0);
+                }
+                let (sin_sum, cos_sum) =
+                    cluster.iter().fold((0.0_f64, 0.0_f64), |(s, c), &ph| {
+                        (s + ph.sin(), c + ph.cos())
+                    });
+                let r = sin_sum.mul_add(sin_sum, cos_sum * cos_sum).sqrt() / n;
+                let psi = sin_sum.atan2(cos_sum);
+                OrderParameter::new(r.clamp(0.0, 1.0), psi)
+            })
+            .collect();
+
+        // Chimera detection: 2+ clusters with phase gap > pi/3 while global r < 0.95
+        let chimera_detected = if clusters.len() >= 2 && global_order.r < CHIMERA_R_THRESHOLD {
+            // Check if any pair of cluster centroids has a gap exceeding CHIMERA_GAP.
+            // We use the centroid psi from each cluster's order parameter.
+            let centroids: Vec<f64> = cluster_orders.iter().map(|o| o.psi).collect();
+            let mut found = false;
+            for i in 0..centroids.len() {
+                for j in (i + 1)..centroids.len() {
+                    let diff = (centroids[i] - centroids[j]).abs();
+                    let angular = diff.min(std::f64::consts::TAU - diff);
+                    if angular > CHIMERA_GAP {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            found
+        } else {
+            false
+        };
+
+        let cluster_count = cluster_orders.len();
+
+        Harmonics {
+            clusters: cluster_orders,
+            chimera_detected,
+            cluster_count,
         }
     }
 }
@@ -308,6 +430,152 @@ mod tests {
         let spheres = HashMap::new();
         let fs = FieldState::compute(&spheres, 42);
         assert_eq!(fs.tick, 42);
+    }
+
+    // ── Harmonics computation ──
+
+    #[test]
+    fn compute_harmonics_empty() {
+        let spheres = HashMap::new();
+        let fs = FieldState::compute(&spheres, 0);
+        assert!(fs.harmonics.clusters.is_empty());
+        assert!(!fs.harmonics.chimera_detected);
+        assert_eq!(fs.harmonics.cluster_count, 0);
+    }
+
+    #[test]
+    fn compute_harmonics_single_sphere() {
+        let mut spheres = HashMap::new();
+        spheres.insert(
+            PaneId::new("a"),
+            PaneSphere { phase: 1.0, ..PaneSphere::default() },
+        );
+        let fs = FieldState::compute(&spheres, 1);
+        assert_eq!(fs.harmonics.cluster_count, 1);
+        assert!(!fs.harmonics.chimera_detected);
+        assert_eq!(fs.harmonics.clusters.len(), 1);
+        // Single sphere cluster → r = 1.0
+        assert!((fs.harmonics.clusters[0].r - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn compute_harmonics_synchronized_field() {
+        // All phases at ~0.5 rad → single cluster, no chimera
+        let mut spheres = HashMap::new();
+        for i in 0..5 {
+            spheres.insert(
+                PaneId::new(format!("s{i}")),
+                PaneSphere {
+                    phase: 0.5 + (i as f64 * 0.01),
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        let fs = FieldState::compute(&spheres, 1);
+        assert_eq!(fs.harmonics.cluster_count, 1);
+        assert!(!fs.harmonics.chimera_detected);
+        assert!(fs.harmonics.clusters[0].r > 0.99);
+    }
+
+    #[test]
+    fn compute_harmonics_two_clusters() {
+        // Two groups: phase ~0.0 and phase ~pi → 2 clusters
+        let mut spheres = HashMap::new();
+        for i in 0..3 {
+            spheres.insert(
+                PaneId::new(format!("a{i}")),
+                PaneSphere {
+                    phase: 0.1 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        for i in 0..3 {
+            spheres.insert(
+                PaneId::new(format!("b{i}")),
+                PaneSphere {
+                    phase: std::f64::consts::PI + 0.1 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        let fs = FieldState::compute(&spheres, 1);
+        assert!(fs.harmonics.cluster_count >= 2);
+    }
+
+    #[test]
+    fn compute_harmonics_chimera_detected() {
+        // Two well-separated clusters with low global r → chimera
+        let mut spheres = HashMap::new();
+        for i in 0..4 {
+            spheres.insert(
+                PaneId::new(format!("a{i}")),
+                PaneSphere {
+                    phase: 0.0 + 0.05 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        for i in 0..4 {
+            spheres.insert(
+                PaneId::new(format!("b{i}")),
+                PaneSphere {
+                    phase: std::f64::consts::PI + 0.05 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        let fs = FieldState::compute(&spheres, 1);
+        // Global r should be low with two opposing clusters
+        assert!(fs.order.r < 0.5);
+        assert!(fs.harmonics.chimera_detected);
+        assert!(fs.harmonics.cluster_count >= 2);
+    }
+
+    #[test]
+    fn compute_harmonics_no_chimera_when_highly_synced() {
+        // All phases tightly packed → high global r, no chimera
+        let mut spheres = HashMap::new();
+        for i in 0..10 {
+            spheres.insert(
+                PaneId::new(format!("s{i}")),
+                PaneSphere {
+                    phase: 1.0 + 0.001 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        let fs = FieldState::compute(&spheres, 1);
+        assert!(fs.order.r > 0.95);
+        assert!(!fs.harmonics.chimera_detected);
+    }
+
+    #[test]
+    fn compute_harmonics_per_cluster_r() {
+        // Two tight clusters → each cluster has high r
+        let mut spheres = HashMap::new();
+        for i in 0..3 {
+            spheres.insert(
+                PaneId::new(format!("a{i}")),
+                PaneSphere {
+                    phase: 0.5 + 0.01 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        for i in 0..3 {
+            spheres.insert(
+                PaneId::new(format!("b{i}")),
+                PaneSphere {
+                    phase: 3.5 + 0.01 * i as f64,
+                    ..PaneSphere::default()
+                },
+            );
+        }
+        let fs = FieldState::compute(&spheres, 1);
+        for cluster_order in &fs.harmonics.clusters {
+            assert!(cluster_order.r > 0.99, "each tight cluster should have high r");
+        }
     }
 
     #[test]

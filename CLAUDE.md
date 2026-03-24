@@ -1,11 +1,13 @@
 # ORAC Sidecar — Intelligent Fleet Coordination Proxy
 
 > **Envoy-like proxy specialized for AI agent traffic**
-> **STATUS: COMPLETE** — 8 layers, 40 modules, 30,524 LOC, 1,454 tests, 0 clippy warnings (pedantic)
+> **STATUS: PRODUCTION HARDENED** — 8 layers, 40 modules, 30,524 LOC, 1,601 tests, 0 clippy warnings (pedantic)
 > **ULTRAPLATE Service ID:** `orac-sidecar` | **Port:** 8133 | **Batch:** 5 (needs PV2 + POVM)
-> **Git:** `git@gitlab.com:lukeomahoney/orac-sidecar.git` | **Branch:** `main`
+> **Git:** `git@gitlab.com:lukeomahoney/orac-sidecar.git` | **Branch:** `main` | **Commit:** `54671db`
 > **Plan:** `ORAC_PLAN.md` | **Mindmap:** `ORAC_MINDMAP.md` | **Master Index:** `MASTER_INDEX.md`
-> **Obsidian:** `[[Session 050 — ORAC Sidecar Architecture]]` | `[[Session 051 — ORAC Sidecar .claude Scaffolding]]`
+> **Obsidian:** `[[Session 056 — ORAC God-Tier Mastery]]` | `[[ORAC Sidecar — Architecture Schematics]]` | `[[ORAC Sidecar — Diagnostic Schematics]]`
+> **Bugs:** `[[ULTRAPLATE — Bugs and Known Issues — ORAC Update 2026-03-23]]` (34 found, 31 fixed)
+> **Fleet Commander:** `[[Fleet Commander — Modularization Plan and Gap Analysis]]` (planned, 10-module Rust crate)
 
 ---
 

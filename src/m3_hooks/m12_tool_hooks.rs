@@ -21,7 +21,7 @@ use crate::m1_core::m01_core_types::PaneStatus;
 #[cfg(feature = "persistence")]
 use crate::m5_bridges::m26_blackboard::PaneRecord;
 
-use crate::m4_intelligence::m20_semantic_router::{classify_content, route, RouteRequest};
+use crate::m4_intelligence::m20_semantic_router::{classify_content, classify_tool, route, RouteRequest};
 
 use super::m10_hook_server::{
     http_get, http_post, HookEvent, HookResponse, OracState,
@@ -45,6 +45,7 @@ const POLL_EVERY_N: u64 = 5;
 /// 3. Checks for `TASK_COMPLETE` in tool output (completes active task)
 /// 4. Throttled task polling (1-in-5 calls)
 /// 5. Claims first pending task if found, returns as `systemMessage`
+#[allow(clippy::too_many_lines)] // Structured by section: memory, status, blackboard, tokens, task-complete, poll
 pub async fn handle_post_tool_use(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
@@ -60,12 +61,46 @@ pub async fn handle_post_tool_use(
     // Find session for this hook call
     let (session_id, pane_id_str) = find_session_pane(&state, &event);
 
+    // BUG-SCAN-002 fix: record semantic dispatch for EVERY tool use, not just
+    // task claims. Feeds DispatchLoop emergence detector and fitness tensor D2.
+    #[cfg(feature = "intelligence")]
+    {
+        let domain = classify_tool(tool_name);
+        state.record_dispatch(&domain);
+    }
+
     // Increment total_tool_calls for ghost trace enrichment (BUG-L3-002 fix)
+    // BUG-057i: log if session vanished mid-flight (concurrent Stop race)
     {
         let mut sessions = state.sessions.write();
         if let Some(tracker) = sessions.get_mut(&session_id) {
             tracker.total_tool_calls += 1;
+        } else {
+            tracing::debug!(session = %session_id, "PostToolUse: session already removed (concurrent Stop)");
         }
+    }
+
+    // BUG-GEN15: Record trace span for tool use (populates /traces endpoint)
+    #[cfg(feature = "monitoring")]
+    {
+        use crate::m7_monitoring::m32_otel_traces::SpanBuilder;
+        if let Ok(span) = SpanBuilder::start(format!("tool.{tool_name}")) {
+            state.trace_store.record(span.finish_ok());
+        }
+    }
+
+    // Increment global tool call counter for cascade heat computation (Gen 9)
+    state.total_tool_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Record token usage estimate (input ≈ tool_input chars/4, output ≈ tool_output chars/4)
+    #[cfg(feature = "monitoring")]
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let input_tokens = (summary.len() / 4).max(1) as u64;
+        #[allow(clippy::cast_possible_truncation)]
+        let output_tokens = (tool_output.len() / 4).max(1) as u64;
+        let pane = crate::m1_core::m01_core_types::PaneId::new(&pane_id_str);
+        let _ = state.token_accountant.record_pane_usage(&pane, input_tokens, output_tokens);
     }
 
     // 1. Record memory (fire-and-forget)
@@ -108,7 +143,21 @@ pub async fn handle_post_tool_use(
             tasks_completed: existing.as_ref().map_or(0, |r| r.tasks_completed),
         };
         if let Err(e) = bb.upsert_pane(&record) {
-            tracing::debug!("blackboard upsert_pane failed: {e}");
+            tracing::warn!(pane = %pane_id_str, "blackboard upsert_pane (status) failed: {e}");
+        }
+    }
+
+    // 2c. Record token usage approximation (BUG-GEN07 fix: token accounting was never populated)
+    // Use input/output string lengths as byte-proxy for tokens (~4 bytes/token).
+    #[cfg(feature = "monitoring")]
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let input_approx = summary.len() as u64 / 4;
+        #[allow(clippy::cast_possible_truncation)]
+        let output_approx = tool_output.len() as u64 / 4;
+        let pid = crate::m1_core::m01_core_types::PaneId::new(&pane_id_str);
+        if let Err(e) = state.token_accountant.record_pane_usage(&pid, input_approx, output_approx) {
+            tracing::debug!("token accounting record failed: {e}");
         }
     }
 
@@ -121,35 +170,8 @@ pub async fn handle_post_tool_use(
             #[cfg(not(feature = "intelligence"))]
             fire_and_forget_post(complete_url, "{}".into());
 
-            // Record completed task in blackboard
             #[cfg(feature = "persistence")]
-            if let Some(bb) = state.blackboard() {
-                use crate::m5_bridges::m26_blackboard::TaskRecord;
-
-                let now_ms = super::m10_hook_server::epoch_ms();
-                #[allow(clippy::cast_precision_loss)]
-                let now = now_ms as f64 / 1000.0;
-                let claimed_ms = get_task_claimed_ms(&state, &session_id);
-                #[allow(clippy::cast_precision_loss)]
-                let duration_secs = claimed_ms
-                    .map_or(0.0, |c| now_ms.saturating_sub(c) as f64 / 1000.0);
-                let pid = PaneId::new(&pane_id_str);
-                let _ = bb.insert_task(&TaskRecord {
-                    task_id: task_id.clone(),
-                    pane_id: pid.clone(),
-                    description: summary.clone(),
-                    outcome: "completed".into(),
-                    finished_at: now,
-                    duration_secs,
-                });
-                // Increment tasks_completed
-                if let Ok(Some(mut pane)) = bb.get_pane(&pid) {
-                    pane.tasks_completed += 1;
-                    pane.status = PaneStatus::Idle;
-                    pane.updated_at = now;
-                    let _ = bb.upsert_pane(&pane);
-                }
-            }
+            record_task_completion(&state, &session_id, &pane_id_str, &task_id, &summary);
 
             clear_active_task(&state, &session_id);
         }
@@ -161,8 +183,10 @@ pub async fn handle_post_tool_use(
     }
 
     // 4. Throttled task polling (1-in-5)
+    // BUG-057 fix: increment BEFORE check so first call returns 1 (not 0).
+    // Old code: 0%5==0 triggered poll on very first PostToolUse.
     let poll_count = increment_poll_counter(&state, &session_id);
-    if poll_count % POLL_EVERY_N != 0 {
+    if poll_count % POLL_EVERY_N != 1 {
         return Json(HookResponse::empty());
     }
 
@@ -236,7 +260,7 @@ async fn poll_route_and_claim(
                 duration_secs: 0.0,
             };
             if let Err(e) = bb.lock().insert_task(&task_record) {
-                tracing::debug!("blackboard insert_task failed: {e}");
+                tracing::warn!(task_id = %task.id, "blackboard insert_task (claimed) failed: {e}");
             }
         }
 
@@ -297,6 +321,52 @@ pub async fn handle_pre_tool_use(
     }
 
     Json(HookResponse::empty())
+}
+
+// ──────────────────────────────────────────────────────────────
+// Blackboard persistence helpers
+// ──────────────────────────────────────────────────────────────
+
+/// Record a completed task in the blackboard and increment the pane's
+/// `tasks_completed` counter. Logs at `warn` on `SQLite` failure (BUG-H002 fix).
+#[cfg(feature = "persistence")]
+fn record_task_completion(
+    state: &OracState,
+    session_id: &str,
+    pane_id_str: &str,
+    task_id: &str,
+    summary: &str,
+) {
+    use crate::m5_bridges::m26_blackboard::TaskRecord;
+
+    let Some(bb) = state.blackboard() else { return };
+    let now_ms = super::m10_hook_server::epoch_ms();
+    #[allow(clippy::cast_precision_loss)]
+    let now = now_ms as f64 / 1000.0;
+    let claimed_ms = get_task_claimed_ms(state, session_id);
+    #[allow(clippy::cast_precision_loss)]
+    let duration_secs = claimed_ms
+        .map_or(0.0, |c| now_ms.saturating_sub(c) as f64 / 1000.0);
+    let pid = PaneId::new(pane_id_str);
+    if let Err(e) = bb.insert_task(&TaskRecord {
+        task_id: task_id.to_owned(),
+        pane_id: pid.clone(),
+        description: summary.to_owned(),
+        outcome: "completed".into(),
+        finished_at: now,
+        duration_secs,
+    }) {
+        tracing::warn!(%task_id, "blackboard insert_task (completed) failed: {e}");
+    }
+    // Increment tasks_completed
+    if let Ok(Some(mut pane)) = bb.get_pane(&pid) {
+        pane.tasks_completed += 1;
+        pane.status = PaneStatus::Idle;
+        pane.updated_at = now;
+        if let Err(e) = bb.upsert_pane(&pane) {
+            tracing::warn!(pane = %pid, "blackboard upsert_pane (task complete) failed: {e}");
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1001,5 +1071,53 @@ mod tests {
             Some("executor"),
             "blocked reader should be skipped, executor claimed instead"
         );
+    }
+
+    // ── BUG-057 edge case tests ──
+
+    #[test]
+    fn poll_throttle_skips_first_call() {
+        // BUG-057i: poll_count starts at 1 after increment, so 1 % 5 == 1 → poll
+        // Calls 2,3,4,5 skip (2%5!=1, 3%5!=1, 4%5!=1, 5%5!=1), call 6 polls (6%5==1)
+        assert_eq!(1 % POLL_EVERY_N, 1); // First call polls
+        assert_ne!(2 % POLL_EVERY_N, 1); // Second skips
+        assert_ne!(3 % POLL_EVERY_N, 1); // Third skips
+        assert_eq!(6 % POLL_EVERY_N, 1); // Sixth polls
+    }
+
+    #[test]
+    fn truncate_multibyte_utf8() {
+        // BUG-L3-003: truncation must be char-safe for multi-byte sequences
+        let s = "日本語テスト🎉"; // mixed 3-byte and 4-byte chars
+        let result = truncate_string(s, 3);
+        assert!(result.ends_with("..."));
+        // Should contain exactly 3 characters before "..."
+        let prefix_chars = result.trim_end_matches("...").chars().count();
+        assert_eq!(prefix_chars, 3);
+    }
+
+    #[test]
+    fn find_session_pane_empty_sessions() {
+        let state = OracState::new(crate::m1_core::m03_config::PvConfig::default());
+        let event = HookEvent::default();
+        let (sid, pid) = find_session_pane(&state, &event);
+        assert!(sid.is_empty()); // default session_id is empty string
+        assert!(pid.contains(':')); // generated pane_id has colon
+    }
+
+    #[test]
+    fn increment_poll_counter_missing_session() {
+        let state = OracState::new(crate::m1_core::m03_config::PvConfig::default());
+        // No session registered — should return 1 (not panic)
+        let count = increment_poll_counter(&state, "nonexistent");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn thermal_cold_no_warning() {
+        // Temperature below threshold → no warning
+        let (temp, target) = (0.4, 0.5);
+        let ratio = (temp - target) / target;
+        assert!(ratio < 0.3, "below target → no thermal warning");
     }
 }

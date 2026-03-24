@@ -306,8 +306,16 @@ impl TensorValues {
     }
 
     /// Set the value of a specific dimension.
+    ///
+    /// Non-finite values (`NaN`, `Infinity`) are replaced with the neutral
+    /// midpoint (0.5) to prevent poisoning the fitness tensor. Finite values
+    /// are clamped to [0.0, 1.0].
     pub fn set(&mut self, dim: FitnessDimension, value: f64) {
-        self.values[dim.index()] = value.clamp(0.0, 1.0);
+        self.values[dim.index()] = if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.5 // BUG-060: NaN/Inf → neutral midpoint
+        };
     }
 
     /// Validate that all values are finite and in [0.0, 1.0].
@@ -852,6 +860,29 @@ mod tests {
 
         t.set(FitnessDimension::Latency, -0.3);
         assert!((t.get(FitnessDimension::Latency) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn tensor_set_replaces_nan_with_neutral() {
+        let mut t = TensorValues::zero();
+        t.set(FitnessDimension::FieldCoherence, f64::NAN);
+        let v = t.get(FitnessDimension::FieldCoherence);
+        assert!(v.is_finite(), "NaN should be replaced with 0.5");
+        assert!((v - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn tensor_set_replaces_inf_with_neutral() {
+        let mut t = TensorValues::zero();
+        t.set(FitnessDimension::ErrorRate, f64::INFINITY);
+        let v = t.get(FitnessDimension::ErrorRate);
+        assert!(v.is_finite(), "Infinity should be replaced with 0.5");
+        assert!((v - 0.5).abs() < f64::EPSILON);
+
+        t.set(FitnessDimension::Latency, f64::NEG_INFINITY);
+        let v2 = t.get(FitnessDimension::Latency);
+        assert!(v2.is_finite(), "-Infinity should be replaced with 0.5");
+        assert!((v2 - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]

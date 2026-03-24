@@ -450,6 +450,28 @@ impl RalphEngine {
         *self.paused.write() = false;
     }
 
+    /// Hydrate RALPH state from persisted storage (blackboard).
+    ///
+    /// Restores generation counter and completed cycles so evolution
+    /// continues from where it left off across ORAC restarts.
+    /// Does NOT restore mutation history or active mutation — those
+    /// rebuild naturally as the loop cycles.
+    pub fn hydrate(&self, generation: u64, completed_cycles: u64, peak_fitness: f64) {
+        *self.generation.write() = generation;
+        *self.completed_cycles.write() = completed_cycles;
+        {
+            let mut stats = self.stats.write();
+            stats.peak_fitness = peak_fitness;
+            stats.total_cycles = completed_cycles;
+        }
+        tracing::info!(
+            generation,
+            completed_cycles,
+            peak_fitness = format!("{peak_fitness:.4}"),
+            "RALPH hydrated from blackboard"
+        );
+    }
+
     // ── Phase Execution ──
 
     /// Execute the current RALPH phase.
@@ -674,11 +696,14 @@ impl RalphEngine {
                     engine_stats.peak_fitness = current_fitness;
                 }
             }
-        }
 
-        // Complete cycle
-        *self.completed_cycles.write() += 1;
-        self.stats.write().total_cycles += 1;
+            // BUG-059 fix: Only count cycles with actual mutations harvested.
+            // Previously, completed_cycles incremented on every Harvest entry,
+            // including skipped generations (no mutation proposed), inflating the
+            // cycle count and triggering premature auto-pause at max_cycles.
+            *self.completed_cycles.write() += 1;
+            self.stats.write().total_cycles += 1;
+        }
 
         // Back to Recognize
         *self.phase.write() = RalphPhase::Recognize;
@@ -1171,5 +1196,38 @@ mod tests {
         let _stats = engine.stats();
         let _mutations = engine.recent_mutations(5);
         let _fitness = engine.fitness().current_fitness();
+    }
+
+    #[test]
+    fn bug_059_skipped_generation_does_not_inflate_cycles() {
+        // BUG-059: When the mutation selector skips (all on target/cooldown),
+        // completed_cycles should NOT increment.
+        let engine = RalphEngine::with_config(RalphEngineConfig {
+            verification_ticks: 0,
+            ..Default::default()
+        });
+        // Reset production params, register ONLY an on-target parameter
+        engine.selector.reset();
+        engine.selector.register_parameter(MutableParameter::new(
+            "on_target", 0.5, 0.0, 1.0, 0.5, "Already on target",
+        )).unwrap();
+
+        let tensor = make_tensor(0.8);
+
+        // Run a full 5-phase cycle — Propose will skip, Harvest has no mutation
+        for tick in 1..=5 {
+            engine.tick(&tensor, tick).unwrap();
+        }
+
+        // Selector should have skipped (parameter is on target)
+        let stats = engine.stats();
+        assert!(stats.total_skipped > 0,
+            "expected selector to skip (all on target), skipped={}, proposed={}",
+            stats.total_skipped, stats.total_proposed);
+
+        // Cycle counter should NOT have incremented for skipped generations
+        assert_eq!(stats.total_cycles, 0,
+            "BUG-059: skipped generations should not inflate cycle count (got {})",
+            stats.total_cycles);
     }
 }

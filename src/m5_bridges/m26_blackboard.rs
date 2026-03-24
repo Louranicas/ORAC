@@ -125,9 +125,85 @@ pub struct ConsentAuditEntry {
     pub changed_ms: u64,
 }
 
+/// A single Hebbian STDP summary record (one per tick batch).
+#[derive(Debug, Clone)]
+pub struct HebbianSummaryRecord {
+    /// Tick number when this summary was recorded.
+    pub tick: u64,
+    /// Number of LTP (potentiation) events.
+    pub ltp_count: u64,
+    /// Number of LTD (depression) events.
+    pub ltd_count: u64,
+    /// Number of connections at weight floor.
+    pub at_floor_count: u64,
+    /// Total absolute weight change across all connections.
+    pub total_weight_change: f64,
+    /// Total number of coupling connections.
+    pub connections_total: u64,
+    /// Mean connection weight.
+    pub weight_mean: f64,
+    /// Minimum connection weight.
+    pub weight_min: f64,
+    /// Maximum connection weight.
+    pub weight_max: f64,
+    /// Epoch seconds when this record was created.
+    pub created_at: f64,
+}
+
 // ──────────────────────────────────────────────────────────────
 // Blackboard (SQLite-backed)
 // ──────────────────────────────────────────────────────────────
+
+/// Persisted session state for cross-restart hydration.
+#[derive(Clone, Debug)]
+pub struct SavedSession {
+    /// Session identifier (from hook registration).
+    pub session_id: String,
+    /// Associated sphere/pane ID.
+    pub pane_id: String,
+    /// Active task (if any).
+    pub active_task_id: Option<String>,
+    /// Tool call count for throttling.
+    pub poll_counter: u64,
+    /// Total tool calls in this session.
+    pub total_tool_calls: u64,
+    /// Session start time (epoch ms).
+    pub started_ms: u64,
+    /// Persona string.
+    pub persona: String,
+}
+
+/// Persisted RALPH state for cross-restart hydration.
+#[derive(Clone, Debug)]
+pub struct SavedRalphState {
+    /// Generation counter.
+    pub generation: u64,
+    /// Completed RALPH cycles.
+    pub completed_cycles: u64,
+    /// Most recent fitness.
+    pub current_fitness: f64,
+    /// Peak fitness observed.
+    pub peak_fitness: f64,
+    /// Total mutations proposed.
+    pub total_proposed: u64,
+    /// Total mutations accepted.
+    pub total_accepted: u64,
+    /// Total mutations rolled back.
+    pub total_rolled_back: u64,
+    /// Last RALPH phase name.
+    pub last_phase: String,
+}
+
+/// Persisted coupling weight for cross-restart hydration.
+#[derive(Clone, Debug)]
+pub struct SavedCouplingWeight {
+    /// Source sphere/pane ID.
+    pub from_id: String,
+    /// Target sphere/pane ID.
+    pub to_id: String,
+    /// Connection weight `[0.0, 1.0]`.
+    pub weight: f64,
+}
 
 /// `SQLite`-backed shared fleet state.
 ///
@@ -176,6 +252,7 @@ impl Blackboard {
     }
 
     /// Run schema migrations.
+    #[allow(clippy::too_many_lines)] // 10-table schema migration in a single execute_batch
     fn migrate(&self) -> PvResult<()> {
         self.conn
             .execute_batch(
@@ -242,6 +319,55 @@ impl Blackboard {
                     ON consent_audit(sphere_id);
                 CREATE INDEX IF NOT EXISTS idx_consent_audit_time
                     ON consent_audit(changed_ms);
+
+                CREATE TABLE IF NOT EXISTS hebbian_summary (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tick                INTEGER NOT NULL,
+                    ltp_count           INTEGER NOT NULL DEFAULT 0,
+                    ltd_count           INTEGER NOT NULL DEFAULT 0,
+                    at_floor_count      INTEGER NOT NULL DEFAULT 0,
+                    total_weight_change REAL NOT NULL DEFAULT 0.0,
+                    connections_total   INTEGER NOT NULL DEFAULT 0,
+                    weight_mean         REAL NOT NULL DEFAULT 0.0,
+                    weight_min          REAL NOT NULL DEFAULT 0.0,
+                    weight_max          REAL NOT NULL DEFAULT 0.0,
+                    created_at          REAL NOT NULL DEFAULT 0.0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hebbian_summary_tick
+                    ON hebbian_summary(tick DESC);
+
+                CREATE TABLE IF NOT EXISTS ralph_state (
+                    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                    generation          INTEGER NOT NULL DEFAULT 0,
+                    completed_cycles    INTEGER NOT NULL DEFAULT 0,
+                    current_fitness     REAL NOT NULL DEFAULT 0.5,
+                    peak_fitness        REAL NOT NULL DEFAULT 0.0,
+                    total_proposed      INTEGER NOT NULL DEFAULT 0,
+                    total_accepted      INTEGER NOT NULL DEFAULT 0,
+                    total_rolled_back   INTEGER NOT NULL DEFAULT 0,
+                    last_phase          TEXT NOT NULL DEFAULT 'Recognize',
+                    updated_at          REAL NOT NULL DEFAULT 0.0
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id      TEXT PRIMARY KEY,
+                    pane_id         TEXT NOT NULL,
+                    active_task_id  TEXT,
+                    poll_counter    INTEGER NOT NULL DEFAULT 0,
+                    total_tool_calls INTEGER NOT NULL DEFAULT 0,
+                    started_ms      INTEGER NOT NULL,
+                    persona         TEXT NOT NULL DEFAULT '',
+                    updated_at      REAL NOT NULL DEFAULT 0.0
+                );
+
+                CREATE TABLE IF NOT EXISTS coupling_weights (
+                    from_id     TEXT NOT NULL,
+                    to_id       TEXT NOT NULL,
+                    weight      REAL NOT NULL,
+                    updated_at  REAL NOT NULL DEFAULT 0.0,
+                    PRIMARY KEY (from_id, to_id)
+                );
                 ",
             )
             .map_err(|e| PvError::Database(format!("migrate: {e}")))?;
@@ -876,6 +1002,310 @@ impl Blackboard {
                 .push(row.map_err(|e| PvError::Database(format!("consent_audit row: {e}")))?);
         }
         Ok(entries)
+    }
+
+    // ── Hebbian STDP summary ──
+
+    /// Insert a Hebbian STDP summary record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn insert_hebbian_summary(&self, record: &HebbianSummaryRecord) -> PvResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO hebbian_summary \
+                 (tick, ltp_count, ltd_count, at_floor_count, total_weight_change, \
+                  connections_total, weight_mean, weight_min, weight_max, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    record.tick,
+                    record.ltp_count,
+                    record.ltd_count,
+                    record.at_floor_count,
+                    record.total_weight_change,
+                    record.connections_total,
+                    record.weight_mean,
+                    record.weight_min,
+                    record.weight_max,
+                    record.created_at,
+                ],
+            )
+            .map_err(|e| PvError::Database(format!("insert hebbian_summary: {e}")))?;
+        Ok(())
+    }
+
+    /// Retrieve recent Hebbian STDP summaries, most recent first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn recent_hebbian_summaries(&self, limit: u32) -> PvResult<Vec<HebbianSummaryRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT tick, ltp_count, ltd_count, at_floor_count, total_weight_change, \
+                 connections_total, weight_mean, weight_min, weight_max, created_at \
+                 FROM hebbian_summary ORDER BY tick DESC LIMIT ?1",
+            )
+            .map_err(|e| PvError::Database(format!("prepare recent_hebbian: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(HebbianSummaryRecord {
+                    tick: row.get(0)?,
+                    ltp_count: row.get(1)?,
+                    ltd_count: row.get(2)?,
+                    at_floor_count: row.get(3)?,
+                    total_weight_change: row.get(4)?,
+                    connections_total: row.get(5)?,
+                    weight_mean: row.get(6)?,
+                    weight_min: row.get(7)?,
+                    weight_max: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| PvError::Database(format!("recent_hebbian query: {e}")))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(
+                row.map_err(|e| PvError::Database(format!("hebbian_summary row: {e}")))?,
+            );
+        }
+        Ok(records)
+    }
+
+    /// Count total Hebbian summary records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn hebbian_summary_count(&self) -> PvResult<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM hebbian_summary", [], |row| row.get(0))
+            .map_err(|e| PvError::Database(format!("hebbian_summary count: {e}")))
+    }
+    // ── RALPH state persistence ──
+
+    /// Save RALPH evolution state (upsert singleton row).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn save_ralph_state(&self, rs: &SavedRalphState) -> PvResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        self.conn
+            .execute(
+                "INSERT INTO ralph_state (id, generation, completed_cycles, current_fitness, \
+                 peak_fitness, total_proposed, total_accepted, total_rolled_back, last_phase, \
+                 updated_at) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 generation=?1, completed_cycles=?2, current_fitness=?3, peak_fitness=?4, \
+                 total_proposed=?5, total_accepted=?6, total_rolled_back=?7, last_phase=?8, \
+                 updated_at=?9",
+                rusqlite::params![
+                    rs.generation,
+                    rs.completed_cycles,
+                    rs.current_fitness,
+                    rs.peak_fitness,
+                    rs.total_proposed,
+                    rs.total_accepted,
+                    rs.total_rolled_back,
+                    rs.last_phase,
+                    now,
+                ],
+            )
+            .map_err(|e| PvError::Database(format!("save ralph_state: {e}")))?;
+        Ok(())
+    }
+
+    /// Load persisted RALPH state (returns `None` if no state saved).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn load_ralph_state(&self) -> PvResult<Option<SavedRalphState>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT generation, completed_cycles, current_fitness, peak_fitness, \
+                 total_proposed, total_accepted, total_rolled_back, last_phase \
+                 FROM ralph_state WHERE id = 1",
+            )
+            .map_err(|e| PvError::Database(format!("prepare load ralph_state: {e}")))?;
+
+        let result = stmt
+            .query_row([], |row| {
+                Ok(SavedRalphState {
+                    generation: row.get(0)?,
+                    completed_cycles: row.get(1)?,
+                    current_fitness: row.get(2)?,
+                    peak_fitness: row.get(3)?,
+                    total_proposed: row.get(4)?,
+                    total_accepted: row.get(5)?,
+                    total_rolled_back: row.get(6)?,
+                    last_phase: row.get(7)?,
+                })
+            })
+            .optional()
+            .map_err(|e| PvError::Database(format!("load ralph_state: {e}")))?;
+        Ok(result)
+    }
+
+    // ── Sessions ──
+
+    /// Save all active sessions (upsert).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn save_sessions(&self, sessions: &[SavedSession]) -> PvResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| PvError::Database(format!("begin save_sessions: {e}")))?;
+        for s in sessions {
+            tx.execute(
+                "INSERT INTO sessions (session_id, pane_id, active_task_id, poll_counter, \
+                 total_tool_calls, started_ms, persona, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT(session_id) DO UPDATE SET \
+                 pane_id=?2, active_task_id=?3, poll_counter=?4, \
+                 total_tool_calls=?5, persona=?7, updated_at=?8",
+                rusqlite::params![
+                    s.session_id,
+                    s.pane_id,
+                    s.active_task_id,
+                    s.poll_counter,
+                    s.total_tool_calls,
+                    s.started_ms,
+                    s.persona,
+                    now,
+                ],
+            )
+            .map_err(|e| PvError::Database(format!("upsert session: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| PvError::Database(format!("commit save_sessions: {e}")))?;
+        Ok(())
+    }
+
+    /// Load all persisted sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn load_sessions(&self) -> PvResult<Vec<SavedSession>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_id, pane_id, active_task_id, poll_counter, \
+                 total_tool_calls, started_ms, persona FROM sessions",
+            )
+            .map_err(|e| PvError::Database(format!("prepare load_sessions: {e}")))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SavedSession {
+                    session_id: row.get(0)?,
+                    pane_id: row.get(1)?,
+                    active_task_id: row.get(2)?,
+                    poll_counter: row.get(3)?,
+                    total_tool_calls: row.get(4)?,
+                    started_ms: row.get(5)?,
+                    persona: row.get(6)?,
+                })
+            })
+            .map_err(|e| PvError::Database(format!("query load_sessions: {e}")))?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions
+                .push(row.map_err(|e| PvError::Database(format!("row load_sessions: {e}")))?);
+        }
+        Ok(sessions)
+    }
+
+    /// Remove a session from the blackboard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn remove_session(&self, session_id: &str) -> PvResult<()> {
+        self.conn
+            .execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
+                rusqlite::params![session_id],
+            )
+            .map_err(|e| PvError::Database(format!("remove session: {e}")))?;
+        Ok(())
+    }
+
+    // ── Coupling weights ──
+
+    /// Save coupling network weights to blackboard (upsert).
+    ///
+    /// Replaces all stored weights in a single transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn save_coupling_weights(&self, weights: &[SavedCouplingWeight]) -> PvResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| PvError::Database(format!("begin save_coupling_weights: {e}")))?;
+        for w in weights {
+            tx.execute(
+                "INSERT INTO coupling_weights (from_id, to_id, weight, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(from_id, to_id) DO UPDATE SET weight=?3, updated_at=?4",
+                params![w.from_id, w.to_id, w.weight, now],
+            )
+            .map_err(|e| PvError::Database(format!("upsert coupling weight: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| PvError::Database(format!("commit save_coupling_weights: {e}")))?;
+        Ok(())
+    }
+
+    /// Load all persisted coupling weights.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn load_coupling_weights(&self) -> PvResult<Vec<SavedCouplingWeight>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT from_id, to_id, weight FROM coupling_weights")
+            .map_err(|e| PvError::Database(format!("prepare load_coupling_weights: {e}")))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SavedCouplingWeight {
+                    from_id: row.get(0)?,
+                    to_id: row.get(1)?,
+                    weight: row.get(2)?,
+                })
+            })
+            .map_err(|e| PvError::Database(format!("query load_coupling_weights: {e}")))?;
+
+        let mut weights = Vec::new();
+        for row in rows {
+            weights.push(
+                row.map_err(|e| PvError::Database(format!("row load_coupling_weights: {e}")))?,
+            );
+        }
+        Ok(weights)
     }
 }
 
@@ -1856,6 +2286,318 @@ mod tests {
             .unwrap();
             assert_eq!(b.recent_consent_audit("sphere-a", 10).unwrap().len(), 1);
             assert_eq!(b.recent_consent_audit("sphere-b", 10).unwrap().len(), 1);
+        }
+    }
+
+    // ── Hebbian STDP summary tests ──
+
+    #[cfg(feature = "persistence")]
+    mod hebbian_tests {
+        use super::*;
+
+        fn make_record(tick: u64, ltp: u64, ltd: u64) -> HebbianSummaryRecord {
+            HebbianSummaryRecord {
+                tick,
+                ltp_count: ltp,
+                ltd_count: ltd,
+                at_floor_count: 0,
+                total_weight_change: 0.05,
+                connections_total: 10,
+                weight_mean: 0.5,
+                weight_min: 0.15,
+                weight_max: 0.95,
+                created_at: tick as f64 * 5.0,
+            }
+        }
+
+        #[test]
+        fn insert_and_count() {
+            let b = Blackboard::in_memory().unwrap();
+            assert_eq!(b.hebbian_summary_count().unwrap(), 0);
+            b.insert_hebbian_summary(&make_record(1, 3, 2)).unwrap();
+            assert_eq!(b.hebbian_summary_count().unwrap(), 1);
+        }
+
+        #[test]
+        fn insert_multiple_and_count() {
+            let b = Blackboard::in_memory().unwrap();
+            for t in 1..=5 {
+                b.insert_hebbian_summary(&make_record(t, t, 0)).unwrap();
+            }
+            assert_eq!(b.hebbian_summary_count().unwrap(), 5);
+        }
+
+        #[test]
+        fn recent_returns_descending() {
+            let b = Blackboard::in_memory().unwrap();
+            for t in 1..=10 {
+                b.insert_hebbian_summary(&make_record(t, t, 0)).unwrap();
+            }
+            let recent = b.recent_hebbian_summaries(3).unwrap();
+            assert_eq!(recent.len(), 3);
+            assert_eq!(recent[0].tick, 10);
+            assert_eq!(recent[1].tick, 9);
+            assert_eq!(recent[2].tick, 8);
+        }
+
+        #[test]
+        fn recent_limit_respected() {
+            let b = Blackboard::in_memory().unwrap();
+            for t in 1..=20 {
+                b.insert_hebbian_summary(&make_record(t, 1, 1)).unwrap();
+            }
+            let recent = b.recent_hebbian_summaries(5).unwrap();
+            assert_eq!(recent.len(), 5);
+        }
+
+        #[test]
+        fn recent_empty_table() {
+            let b = Blackboard::in_memory().unwrap();
+            let recent = b.recent_hebbian_summaries(10).unwrap();
+            assert!(recent.is_empty());
+        }
+
+        #[test]
+        fn fields_round_trip() {
+            let b = Blackboard::in_memory().unwrap();
+            let rec = HebbianSummaryRecord {
+                tick: 42,
+                ltp_count: 7,
+                ltd_count: 3,
+                at_floor_count: 2,
+                total_weight_change: 0.123_456,
+                connections_total: 15,
+                weight_mean: 0.567,
+                weight_min: 0.15,
+                weight_max: 0.99,
+                created_at: 1234.5,
+            };
+            b.insert_hebbian_summary(&rec).unwrap();
+            let fetched = b.recent_hebbian_summaries(1).unwrap();
+            assert_eq!(fetched.len(), 1);
+            let f = &fetched[0];
+            assert_eq!(f.tick, 42);
+            assert_eq!(f.ltp_count, 7);
+            assert_eq!(f.ltd_count, 3);
+            assert_eq!(f.at_floor_count, 2);
+            assert!((f.total_weight_change - 0.123_456).abs() < 1e-10);
+            assert_eq!(f.connections_total, 15);
+            assert!((f.weight_mean - 0.567).abs() < 1e-10);
+            assert!((f.weight_min - 0.15).abs() < 1e-10);
+            assert!((f.weight_max - 0.99).abs() < 1e-10);
+            assert!((f.created_at - 1234.5).abs() < 1e-10);
+        }
+
+        #[test]
+        fn zero_ltp_ltd_stored() {
+            let b = Blackboard::in_memory().unwrap();
+            b.insert_hebbian_summary(&make_record(1, 0, 0)).unwrap();
+            let recent = b.recent_hebbian_summaries(1).unwrap();
+            assert_eq!(recent[0].ltp_count, 0);
+            assert_eq!(recent[0].ltd_count, 0);
+        }
+
+        #[test]
+        fn large_tick_values() {
+            let b = Blackboard::in_memory().unwrap();
+            b.insert_hebbian_summary(&make_record(u64::MAX / 2, 1, 1))
+                .unwrap();
+            let recent = b.recent_hebbian_summaries(1).unwrap();
+            assert_eq!(recent[0].tick, u64::MAX / 2);
+        }
+
+        #[test]
+        fn count_after_many_inserts() {
+            let b = Blackboard::in_memory().unwrap();
+            for t in 1..=100 {
+                b.insert_hebbian_summary(&make_record(t, t % 5, t % 3))
+                    .unwrap();
+            }
+            assert_eq!(b.hebbian_summary_count().unwrap(), 100);
+        }
+
+        #[test]
+        fn recent_with_same_tick() {
+            let b = Blackboard::in_memory().unwrap();
+            b.insert_hebbian_summary(&make_record(5, 1, 0)).unwrap();
+            b.insert_hebbian_summary(&make_record(5, 2, 0)).unwrap();
+            assert_eq!(b.hebbian_summary_count().unwrap(), 2);
+            let recent = b.recent_hebbian_summaries(10).unwrap();
+            assert_eq!(recent.len(), 2);
+        }
+    }
+
+    // ── Session persistence ──
+
+    mod session_tests {
+        use super::*;
+
+        fn make_session(id: &str, pane: &str) -> SavedSession {
+            SavedSession {
+                session_id: id.to_owned(),
+                pane_id: pane.to_owned(),
+                active_task_id: None,
+                poll_counter: 0,
+                total_tool_calls: 0,
+                started_ms: 1_700_000_000_000,
+                persona: String::new(),
+            }
+        }
+
+        #[test]
+        fn save_and_load_sessions_roundtrip() {
+            let b = Blackboard::in_memory().unwrap();
+            let sessions = vec![
+                make_session("s1", "pane-a"),
+                make_session("s2", "pane-b"),
+            ];
+            b.save_sessions(&sessions).unwrap();
+            let loaded = b.load_sessions().unwrap();
+            assert_eq!(loaded.len(), 2);
+            assert!(loaded.iter().any(|s| s.session_id == "s1"));
+            assert!(loaded.iter().any(|s| s.session_id == "s2"));
+        }
+
+        #[test]
+        fn save_sessions_upsert() {
+            let b = Blackboard::in_memory().unwrap();
+            let mut s = make_session("s1", "pane-a");
+            b.save_sessions(&[s.clone()]).unwrap();
+
+            s.total_tool_calls = 42;
+            s.persona = "architect".to_owned();
+            b.save_sessions(&[s]).unwrap();
+
+            let loaded = b.load_sessions().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].total_tool_calls, 42);
+            assert_eq!(loaded[0].persona, "architect");
+        }
+
+        #[test]
+        fn remove_session() {
+            let b = Blackboard::in_memory().unwrap();
+            b.save_sessions(&[make_session("s1", "p1"), make_session("s2", "p2")])
+                .unwrap();
+            b.remove_session("s1").unwrap();
+            let loaded = b.load_sessions().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].session_id, "s2");
+        }
+
+        #[test]
+        fn load_sessions_empty_returns_empty_vec() {
+            let b = Blackboard::in_memory().unwrap();
+            let loaded = b.load_sessions().unwrap();
+            assert!(loaded.is_empty());
+        }
+
+        #[test]
+        fn save_session_with_active_task() {
+            let b = Blackboard::in_memory().unwrap();
+            let mut s = make_session("s1", "pane-a");
+            s.active_task_id = Some("task-42".to_owned());
+            s.poll_counter = 15;
+            b.save_sessions(&[s]).unwrap();
+
+            let loaded = b.load_sessions().unwrap();
+            assert_eq!(loaded[0].active_task_id.as_deref(), Some("task-42"));
+            assert_eq!(loaded[0].poll_counter, 15);
+        }
+
+        #[test]
+        fn remove_nonexistent_session_is_ok() {
+            let b = Blackboard::in_memory().unwrap();
+            assert!(b.remove_session("nonexistent").is_ok());
+        }
+
+        #[test]
+        fn save_many_sessions() {
+            let b = Blackboard::in_memory().unwrap();
+            let sessions: Vec<_> = (0..20)
+                .map(|i| make_session(&format!("s{i}"), &format!("p{i}")))
+                .collect();
+            b.save_sessions(&sessions).unwrap();
+            let loaded = b.load_sessions().unwrap();
+            assert_eq!(loaded.len(), 20);
+        }
+
+        #[test]
+        fn session_preserves_started_ms() {
+            let b = Blackboard::in_memory().unwrap();
+            let s = SavedSession {
+                session_id: "s1".to_owned(),
+                pane_id: "p1".to_owned(),
+                active_task_id: None,
+                poll_counter: 0,
+                total_tool_calls: 0,
+                started_ms: 1_711_234_567_890,
+                persona: "explorer".to_owned(),
+            };
+            b.save_sessions(&[s]).unwrap();
+            let loaded = b.load_sessions().unwrap();
+            assert_eq!(loaded[0].started_ms, 1_711_234_567_890);
+            assert_eq!(loaded[0].persona, "explorer");
+        }
+
+        // ── Coupling weight tests ──
+
+        fn make_weight(from: &str, to: &str, w: f64) -> SavedCouplingWeight {
+            SavedCouplingWeight {
+                from_id: from.to_owned(),
+                to_id: to.to_owned(),
+                weight: w,
+            }
+        }
+
+        #[test]
+        fn save_and_load_coupling_weights_roundtrip() {
+            let b = Blackboard::in_memory().unwrap();
+            let weights = vec![
+                make_weight("alpha", "beta", 0.85),
+                make_weight("beta", "gamma", 0.42),
+            ];
+            b.save_coupling_weights(&weights).unwrap();
+            let loaded = b.load_coupling_weights().unwrap();
+            assert_eq!(loaded.len(), 2);
+            assert!(loaded.iter().any(|w| w.from_id == "alpha" && w.to_id == "beta"));
+        }
+
+        #[test]
+        fn coupling_weight_upsert() {
+            let b = Blackboard::in_memory().unwrap();
+            b.save_coupling_weights(&[make_weight("a", "b", 0.3)]).unwrap();
+            b.save_coupling_weights(&[make_weight("a", "b", 0.9)]).unwrap();
+            let loaded = b.load_coupling_weights().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert!((loaded[0].weight - 0.9).abs() < 1e-10);
+        }
+
+        #[test]
+        fn load_coupling_weights_empty() {
+            let b = Blackboard::in_memory().unwrap();
+            let loaded = b.load_coupling_weights().unwrap();
+            assert!(loaded.is_empty());
+        }
+
+        #[test]
+        fn save_many_coupling_weights() {
+            let b = Blackboard::in_memory().unwrap();
+            let weights: Vec<_> = (0..50)
+                .map(|i| make_weight(&format!("from-{i}"), &format!("to-{i}"), 0.5))
+                .collect();
+            b.save_coupling_weights(&weights).unwrap();
+            let loaded = b.load_coupling_weights().unwrap();
+            assert_eq!(loaded.len(), 50);
+        }
+
+        #[test]
+        fn coupling_weight_preserves_precision() {
+            let b = Blackboard::in_memory().unwrap();
+            b.save_coupling_weights(&[make_weight("a", "b", 0.123_456_789)])
+                .unwrap();
+            let loaded = b.load_coupling_weights().unwrap();
+            assert!((loaded[0].weight - 0.123_456_789).abs() < 1e-12);
         }
     }
 }

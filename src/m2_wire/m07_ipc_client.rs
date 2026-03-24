@@ -51,7 +51,11 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 const SUBSCRIBE_TIMEOUT_SECS: u64 = 5;
 
 /// Receive timeout for individual frame reads (seconds).
-const RECV_TIMEOUT_SECS: u64 = 30;
+/// IPC receive timeout (seconds). Set high because PV2 bus may be
+/// quiet for extended periods when no spheres are actively working.
+/// A 5-minute timeout avoids unnecessary reconnect churn while still
+/// detecting genuine disconnects.
+const RECV_TIMEOUT_SECS: u64 = 300;
 
 /// Initial backoff delay for reconnection (milliseconds).
 const BACKOFF_INITIAL_MS: u64 = 100;

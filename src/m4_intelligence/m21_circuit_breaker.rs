@@ -123,6 +123,8 @@ pub struct PaneBreaker {
     opened_at_tick: u64,
     /// Most recent tick seen via `tick_check` or `record_failure_at` (BUG-L4-002 fallback).
     last_known_tick: u64,
+    /// Tick at which the last failure was recorded (for diagnostics decay).
+    last_failure_tick: u64,
     /// Total failure count (lifetime, never reset).
     total_failures: u64,
     /// Total success count (lifetime, never reset).
@@ -142,6 +144,7 @@ impl PaneBreaker {
             half_open_requests: 0,
             opened_at_tick: 0,
             last_known_tick: 0,
+            last_failure_tick: 0,
             total_failures: 0,
             total_successes: 0,
             config,
@@ -182,6 +185,24 @@ impl PaneBreaker {
         self.total_successes
     }
 
+    /// Tick at which the last failure was recorded (BUG-M003 diagnostic).
+    #[must_use]
+    pub const fn last_failure_tick(&self) -> u64 {
+        self.last_failure_tick
+    }
+
+    /// How many ticks have elapsed since the last failure (0 if no failures).
+    ///
+    /// BUG-M003 fix: enables diagnostics to distinguish stale failure counters
+    /// from actively-failing services.
+    #[must_use]
+    pub fn failure_age_ticks(&self) -> u64 {
+        if self.last_failure_tick == 0 {
+            return 0;
+        }
+        self.last_known_tick.saturating_sub(self.last_failure_tick)
+    }
+
     /// Record a successful operation.
     pub fn record_success(&mut self) {
         self.total_successes = self.total_successes.saturating_add(1);
@@ -192,8 +213,10 @@ impl PaneBreaker {
                 self.consecutive_failures = 0;
             }
             BreakerState::Open => {
-                // Shouldn't happen (requests blocked), but treat as recovery
-                self.transition_to_closed();
+                // BUG-M005 fix: Requests are blocked in Open state, so a success
+                // here indicates a protocol violation. Do NOT transition to Closed
+                // directly — recovery must go through HalfOpen for safety.
+                // Log as a warning but do not change state.
             }
             BreakerState::HalfOpen => {
                 self.half_open_successes += 1;
@@ -217,6 +240,7 @@ impl PaneBreaker {
     /// which would cause premature `HalfOpen` transition on first `tick_check`.
     pub fn record_failure(&mut self) {
         self.total_failures = self.total_failures.saturating_add(1);
+        self.last_failure_tick = self.last_known_tick;
 
         // BUG-L4-006: floor at 1 so opened_at_tick is never 0
         let tick = self.last_known_tick.max(1);
@@ -244,6 +268,7 @@ impl PaneBreaker {
     /// states (capped at 100).
     pub fn record_failure_at(&mut self, tick: u64) {
         self.last_known_tick = tick;
+        self.last_failure_tick = tick;
         self.total_failures = self.total_failures.saturating_add(1);
 
         match self.state {
@@ -701,6 +726,21 @@ mod tests {
         assert_eq!(b.state(), BreakerState::Open);
     }
 
+    // ── BUG-M005: success in Open state must not transition ──
+
+    #[test]
+    fn success_in_open_does_not_close() {
+        let mut b = PaneBreaker::new(config_fast());
+        // Trip breaker to Open
+        for _ in 0..3 {
+            b.record_failure_at(1);
+        }
+        assert_eq!(b.state(), BreakerState::Open);
+        // Record a spurious success while Open — must remain Open
+        b.record_success();
+        assert_eq!(b.state(), BreakerState::Open, "BUG-M005: success in Open must not transition to Closed");
+    }
+
     // ── BreakerRegistry ──
 
     #[test]
@@ -838,15 +878,15 @@ mod tests {
     }
 
     #[test]
-    fn breaker_open_success_transitions_to_closed() {
+    fn breaker_open_success_stays_open() {
         let mut b = PaneBreaker::new(config_fast());
         for i in 0..3 {
             b.record_failure_at(i);
         }
         assert_eq!(b.state(), BreakerState::Open);
-        // Unexpected success while Open (shouldn't happen normally)
+        // BUG-M005 fix: success in Open must NOT close — recovery goes through HalfOpen
         b.record_success();
-        assert_eq!(b.state(), BreakerState::Closed);
+        assert_eq!(b.state(), BreakerState::Open);
     }
 
     #[test]
@@ -978,6 +1018,64 @@ mod tests {
         let (closed, _, half_open) = r.state_counts();
         assert_eq!(closed, 2);
         assert_eq!(half_open, 3);
+    }
+
+    /// BUG-Gen17: Verify full FSM lifecycle via `tick_all` on the registry.
+    /// Closed -> Open (N failures) -> HalfOpen (timeout ticks) -> Closed (success probe).
+    #[test]
+    fn registry_full_fsm_lifecycle_via_tick_all() {
+        let mut r = BreakerRegistry::new(config_fast());
+        let svc = pid("test-service");
+
+        // 1. Starts Closed
+        r.get_or_create(&svc);
+        assert_eq!(r.get(&svc).map(PaneBreaker::state), Some(BreakerState::Closed));
+        assert!(r.allows_request(&svc));
+
+        // 2. Record failures up to threshold (3) -> transitions to Open
+        r.record_failure(&svc, 1);
+        r.record_failure(&svc, 2);
+        assert_eq!(r.get(&svc).map(PaneBreaker::state), Some(BreakerState::Closed));
+        r.record_failure(&svc, 3);
+        assert_eq!(r.get(&svc).map(PaneBreaker::state), Some(BreakerState::Open));
+        assert!(!r.allows_request(&svc));
+
+        // 3. tick_all advances clock but not enough for timeout (5 ticks)
+        r.tick_all(5); // 5 - 3 = 2 ticks elapsed, need 5
+        assert_eq!(r.get(&svc).map(PaneBreaker::state), Some(BreakerState::Open));
+
+        // 4. tick_all at sufficient elapsed time -> transitions to HalfOpen
+        r.tick_all(8); // 8 - 3 = 5 ticks elapsed >= timeout(5)
+        assert_eq!(r.get(&svc).map(PaneBreaker::state), Some(BreakerState::HalfOpen));
+
+        // 5. Success probe in HalfOpen -> transitions to Closed
+        r.record_success(&svc);
+        assert_eq!(r.get(&svc).map(PaneBreaker::state), Some(BreakerState::Closed));
+        assert!(r.allows_request(&svc));
+    }
+
+    /// BUG-Gen17: Verify `tick_all` is a no-op for `Closed` and `HalfOpen` breakers.
+    #[test]
+    fn registry_tick_all_no_false_transitions() {
+        let mut r = BreakerRegistry::new(config_fast());
+        r.get_or_create(&pid("closed-pane")); // Closed
+
+        // Trip one pane to Open, then to HalfOpen
+        for i in 0..3 {
+            r.record_failure(&pid("half-open-pane"), i);
+        }
+        r.tick_all(100); // Open -> HalfOpen
+
+        // Another tick_all should NOT change anything
+        r.tick_all(200);
+        assert_eq!(
+            r.get(&pid("closed-pane")).map(PaneBreaker::state),
+            Some(BreakerState::Closed)
+        );
+        assert_eq!(
+            r.get(&pid("half-open-pane")).map(PaneBreaker::state),
+            Some(BreakerState::HalfOpen)
+        );
     }
 
     #[test]

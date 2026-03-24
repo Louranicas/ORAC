@@ -32,7 +32,7 @@ use crate::m1_core::m05_traits::Bridgeable;
 const RM_PORT: u16 = 8130;
 
 /// Default base URL.
-const DEFAULT_BASE_URL: &str = "localhost:8130";
+const DEFAULT_BASE_URL: &str = "127.0.0.1:8130";
 
 /// Health endpoint path.
 const HEALTH_PATH: &str = "/health";
@@ -45,9 +45,6 @@ const SEARCH_PATH: &str = "/search";
 
 /// Default poll interval in ticks (for reading back).
 const DEFAULT_POLL_INTERVAL: u64 = 30;
-
-/// Tab character for TSV formatting.
-const TAB: char = '\t';
 
 /// Default TTL for field state entries (seconds).
 const DEFAULT_FIELD_STATE_TTL: u64 = 300;
@@ -119,20 +116,17 @@ impl RmRecord {
     /// Sanitizes content by replacing tabs and newlines with spaces.
     #[must_use]
     pub fn to_tsv(&self) -> String {
-        let sanitized_content = self
-            .content
-            .replace(['\t', '\n', '\r'], " ");
-        let sanitized_category = self
-            .category
-            .replace(['\t', '\n', '\r'], " ");
-        let sanitized_agent = self
-            .agent
-            .replace(['\t', '\n', '\r'], " ");
+        // BUG-L002 fix: single-pass write avoids 3 intermediate String allocations.
+        use std::fmt::Write;
 
-        format!(
-            "{}{TAB}{}{TAB}{}{TAB}{}{TAB}{}",
-            sanitized_category, sanitized_agent, self.confidence, self.ttl, sanitized_content
-        )
+        let est_len = self.category.len() + self.agent.len() + self.content.len() + 32;
+        let mut out = String::with_capacity(est_len);
+        sanitize_into(&mut out, &self.category);
+        out.push('\t');
+        sanitize_into(&mut out, &self.agent);
+        let _ = write!(out, "\t{}\t{}\t", self.confidence, self.ttl);
+        sanitize_into(&mut out, &self.content);
+        out
     }
 
     /// Parse from TSV format.
@@ -242,11 +236,20 @@ impl RmBridge {
     }
 
     /// Create a new RM bridge with custom configuration.
+    ///
+    /// Protocol prefixes (`http://`, `https://`) are stripped automatically
+    /// because the bridge uses raw TCP sockets, not an HTTP client (BUG-033).
     #[must_use]
     pub fn with_config(base_url: impl Into<String>, poll_interval: u64) -> Self {
+        let raw: String = base_url.into();
+        let stripped = raw
+            .strip_prefix("http://")
+            .or_else(|| raw.strip_prefix("https://"))
+            .unwrap_or(&raw)
+            .to_owned();
         Self {
             service: "rm".to_owned(),
-            base_url: base_url.into(),
+            base_url: stripped,
             poll_interval: poll_interval.max(1),
             state: RwLock::new(BridgeState::default()),
         }
@@ -462,6 +465,19 @@ fn urlencoded(s: &str) -> String {
 const HEX_CHARS: [u8; 16] = *b"0123456789ABCDEF";
 
 // HTTP helpers now in super::http_helpers (BUG-042 fix)
+
+/// Append `src` to `out`, replacing tabs, newlines, and carriage returns with spaces.
+///
+/// BUG-L002 fix: avoids intermediate `String` allocation from `.replace()`.
+fn sanitize_into(out: &mut String, src: &str) {
+    for ch in src.chars() {
+        if ch == '\t' || ch == '\n' || ch == '\r' {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+}
 
 // ──────────────────────────────────────────────────────────────
 // Tests

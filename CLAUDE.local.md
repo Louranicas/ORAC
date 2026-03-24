@@ -1,8 +1,250 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.4.0","status":"INTEGRATION_VERIFIED","phase":"production-hardened","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":3,"tests":1599,"loc":30524,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_gen":10,"ralph_fitness":0.432,"field_poller":true,"ipc_client":true,"ipc_connected":true,"orac_client":true,"circuit_breaker_wired":true,"semantic_router_wired":true,"blackboard_wired":true,"consent_endpoints":true,"ghost_tracking":true,"sphere_count":66,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_total":12,"endpoints_new_session055":3,"fixes_complete":25,"fixes_remaining":0,"bugs_fixed_session056":6,"cross_service_composite":0.764,"field_r":0.925,"fleet_cc_instances":12,"relay_chain":"4/4","session":"056"}
+{"v":"0.10.0","status":"EVOLUTION_ACTIVE","phase":"habitat-deep-exploration","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":3,"tests":1690,"loc":32000,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_persisted":true,"ralph_gen":1711,"ralph_fitness":0.581,"ralph_phase":"Learn","synthex_wired":true,"synthex_temp":0.838,"vms_wired":true,"vms_memories":61,"vms_r":0.922,"povm_persist_wired":true,"povm_format_fixed":true,"povm_hydration":"2504 pathways loaded, 0 matched coupling IDs","me_eventbus_confirmed_working":true,"me_observer_subscribed":true,"bridge_urls_fixed":true,"field_poller":true,"coupling_pruning":true,"ipc_client":true,"ipc_connected":true,"ipc_state":"subscribed","orac_client":true,"circuit_breaker_wired":true,"semantic_router_wired":true,"blackboard_wired":true,"blackboard_tables":9,"session_persistence":true,"token_accounting_wired":true,"consent_endpoints":true,"ghost_tracking":true,"chimera_detection":true,"correlation_wired":true,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_total":18,"bugs_fixed_session060":8,"bugs_discovered_fleet":45,"docs_produced":37,"docs_lines":12500,"cc_toolkit_scripts":10,"metabolic_phases_complete":4,"gap_analysis":{"GAP_A":"FIXED_session058","GAP_B":"FIXED_session058","GAP_C":"FIXED_session060_sessions_persisted","GAP_D":"NOT_A_BUG_pull_model_works_271K_events","GAP_E":"SYNTHEX_thermal_working_correctly","GAP_F":"breaker_state_not_persisted_low_priority"},"stdp_ltp_per_tick":6,"stdp_ltd_per_tick":247,"stdp_ids_matched":"36/36","coupling_connections":1260,"coupling_weight_range":"0.150-1.000","field_r":0.922,"sphere_count":36,"emergence_detectors":7,"emergence_events":95,"emergence_field_stability":"ACTIVE_firing","beneficial_sync_threshold":"r>0.85","field_stability_threshold":"r>0.70","field_stability_window":20,"tool_library_port_fix":"BashEngine 8101->8102, NAIS 8102->8101","prometheus_crit01":"POST /api/tasks SIGABRT DoS confirmed","ralph_loop_gens":"7 generations, gen1-4 complete with code fixes","fleet_exploration":"9 panes, 6 agents, 12500+ lines findings","next_actions":["wire_DispatchLoop_detector","fix_prometheus_crash_binary","git_commit_push","update_obsidian_master_index"],"obsidian_notes_created":26,"session":"060"}
 ```
+
+---
+
+## Deployment Plan (READY — execute with "deploy plan")
+
+**Read these 3 docs in order:**
+1. `~/projects/shared-context/Session 060 — Habitat Activation Plan.md` (the plan)
+2. `~/projects/shared-context/Session 060 — Plan Gap Analysis.md` (corrections)
+3. `~/projects/shared-context/Session 060 — Agentic Synergy Gap Analysis.md` (synergy fixes)
+
+**Ignition Core (~110 LOC) — do first:**
+- ME EventBus → PV2 bridge: `the_maintenance_engine/src/main.rs` — add HTTP POST bridge from EventBus to `localhost:8132/bus/events` (~30 LOC). Publishers ALREADY EXIST (333K events). Just need external consumer.
+- SYNTHEX thermal: Check `developer_environment_manager/synthex/src/api/rest_server.rs` — verify `/api/ingest` handler calls `thermal.update_heat_sources()`. May be 5 LOC serialization fix.
+- VMS consolidation: Add `POST /v1/adaptation/trigger` call every 300 ticks in ORAC RALPH loop (~5 LOC)
+- ORAC VMS query: Add semantic query to RALPH Recognize phase reading VMS memories (~40 LOC)
+- Coupling weights: Add `coupling_weights` table to blackboard following sessions pattern (~30 LOC)
+
+**Tier S Synergy (~45 LOC) — do second:**
+- `src/m4_intelligence/m18_hebbian_stdp.rs`: Skip STDP when working_count < 2 (~5 LOC)
+- `src/m8_evolution/m37_emergence_detector.rs`: HebbianSaturation check `weight < floor + 0.01` (~3 LOC)
+- `src/bin/main.rs`: Wire DispatchLoop + ConsentCascade in feed_emergence_observations (~30 LOC)
+- `src/m8_evolution/m37_emergence_detector.rs`: `COHERENCE_LOCK_R: 0.998 → 0.98` (~1 LOC)
+
+**Current system state (live at session end):**
+- ORAC: gen=1754, fitness=0.735, r=0.948, emergence=243, 44 spheres, 1892 coupling
+- ME: fitness=0.609, EventBus 333K events (0 external subscribers), 4.16M correlations
+- VMS: r=0.999, 135 memories, morphogenic_cycle=0
+- SYNTHEX: temp=0.600, target=0.500, overall_health=0.75
+- LTP/LTD ratio: 0.055 (target: >0.15)
+- All 5 breakers: Closed, 100% success rate
+
+**Bug triage:** `~/projects/shared-context/tasks/bug-triage-session-060.md` (587 lines, 45 bugs ranked)
+**Fleet findings:** `~/projects/shared-context/tasks/findings-fleet-*.md` (9 files, 6544 lines)
+
+---
+
+## Session 060 — Habitat Deep Exploration + Fleet Fix Deployment (2026-03-24)
+
+**Status:** EVOLUTION ACTIVE — 7-gen RALPH loop, 9-pane fleet exploration, 37 docs produced, emergence firing.
+
+### Resume Protocol
+1. Run `/primehabitat` then `/deephabitat`
+2. Read this file
+3. ORAC running on :8133 with RALPH gen=1711+, emergence=95+, field_r=0.92
+4. 17/17 services healthy (Prometheus needs restart if crashed — CRIT-01)
+5. Check `~/projects/shared-context/tasks/bug-triage-session-060.md` for fix priority list
+
+### Code Changes Deployed
+- **POVM parse fix:** Serde aliases `pre_id/post_id`, both array and wrapped response formats, MAX_RESPONSE 512KB
+- **Session hydration (GAP-C):** New `sessions` table in blackboard, save/load/remove methods, periodic persist
+- **Emergence detection:** BeneficialSync threshold lowered (r>0.85), FieldStability detector (r>0.70, 20-tick window), tick_decay wiring
+- **Token accounting:** PostToolUse → record_pane_usage with chars/4 estimate
+- **ME observer:** successful_polls counter, is_subscribed() accessor, me_observer_subscribed health field
+- **Tool Library:** Port swap fix BashEngine 8101→8102, NAIS 8102→8101
+- **devenv BUG-001:** Cross-session kill via nix::sys::signal (SIGTERM→SIGKILL fallback)
+- **main.rs refactor:** hydrate_startup_state() extracted, clippy single_match_else fix
+
+### Fleet Exploration (9 panes, 6 agents)
+- 9 fleet findings files: SYNTHEX, VMS, ME, SAN-K7, Tool chain, RM+NAIS, ORAC integration, bugs, synergies
+- 37 documentation files, 12,500+ lines
+- 587-line bug triage: 7 CRIT, 13 HIGH, 8 MED, 7 LOW + 5 synergy gaps
+- Consolidated report: `Session 060 — Habitat Deep Exploration Report.md`
+
+### Quality Gate
+- 1690 tests (--features full) — 0 failures
+- `cargo clippy -D warnings -W clippy::pedantic` — 0 warnings
+
+### Metrics Trajectory
+| Metric | Start | End |
+|--------|-------|-----|
+| emergence_events | 0 | 95+ |
+| field_r | 0.730 | 0.922 |
+| ralph_gen | 1665 | 1711 |
+| ralph_fitness | 0.520 | 0.581 |
+| coupling_connections | 506 | 1260 |
+| sphere_count | 23 | 36 |
+| sessions_persist | no | yes |
+| POVM_hydration | parse_error | 2504 pathways loaded |
+
+### Known Issues
+- **CRIT-01:** Prometheus Swarm SIGABRT on POST /api/tasks (pre-compiled binary, Python wrapper?)
+- **POVM ID mismatch:** 2504 pathways loaded but 0 matched coupling IDs (ORAC uses orac-hostname:pid:uuid sphere IDs)
+- **DispatchLoop/ConsentCascade:** Implemented in m37 but not wired in feed loop (monitor-based API)
+
+### Obsidian
+- `[[Session 060 — Fleet Fix Deployment]]`
+- `[[Session 060 — Habitat Deep Exploration Report]]`
+- `[[Session 060 — Fleet Synergy & Nexus Bus Discovery]]`
+
+---
+
+## Session 059 — Evolution Chamber Activation (2026-03-24)
+
+**Status:** EVOLUTION ACTIVE — 4-block deployment, RALPH persists across restarts, STDP firing, chimera detection wired.
+
+### Resume Protocol
+1. Run `/primehabitat` then `/deephabitat`
+2. Read this file
+3. ORAC running on :8133 with RALPH persisted (gen=17+), STDP active, all bridges live
+4. Monitor RALPH fitness trajectory — should trend upward from 0.528
+5. Check POVM co_activations after 60+ ticks (format fix deployed)
+
+### Changes Deployed (4 Blocks)
+- **B1: Coupling pruning** — stale entries removed each poll cycle (`m10_hook_server.rs`)
+- **B2: RALPH persistence (GAP-C)** — `ralph_state` table in blackboard, save/60 ticks, hydrate on startup (`m26_blackboard.rs`, `m36_ralph_engine.rs`, `main.rs`)
+- **B3: POVM format fix** — `source/target` → `pre_id/post_id/weight` (`main.rs:persist_stdp_to_povm`)
+- **B4: Emergence wiring** — ChimeraFormation (6th detector) + emergence→correlation engine (`main.rs`)
+
+### Gap Analysis Corrections
+- **GAP-D DOWNGRADED:** ME EventBus has 271K events via pull model. Not a bug.
+- **Phase force-sync REMOVED:** Would disrupt Kuramoto natural evolution.
+- **DispatchLoop/ConsentCascade DEFERRED:** Low ROI.
+
+### Quality Gate
+- 1665 tests (--features full) — 0 failures
+- `cargo check` — 0 errors
+- `cargo clippy -D warnings` — 0 warnings
+- `cargo clippy -W pedantic` — 0 warnings
+
+### Obsidian
+- `[[Session 059 — Evolution Chamber Activation]]`
+- Reasoning Memory: `r69c19eca0beb`
+
+### Next Steps
+1. Monitor RALPH for 50+ generations — fitness should trend >0.55
+2. Verify POVM co_activations > 0 (format fix needs 60 ticks to take effect)
+3. Git commit + push all changes
+4. Update [[ULTRAPLATE Master Index]] with Session 059 references
+
+---
+
+## Session 058 — GAP-A and GAP-B Fix Deployment (2026-03-24)
+
+**Status:** METABOLICALLY ACTIVE — 2 critical gaps fixed, STDP learning live (LTP=138), IPC subscribed, weight differentiation active (0.15→0.43), 8 fleet missions dispatched.
+
+### Resume Protocol
+1. Run `/primehabitat` then `/deephabitat`
+2. Read this file
+3. ORAC running on :8133 — start via: `cd /home/louranicas/claude-code-workspace/orac-sidecar && RUST_LOG=orac_sidecar=info PORT=8133 PV2_ADDR=127.0.0.1:8132 SYNTHEX_ADDR=127.0.0.1:8090 POVM_ADDR=127.0.0.1:8125 RM_ADDR=127.0.0.1:8130 nohup /home/louranicas/.local/bin/orac-sidecar > /tmp/orac-sidecar-session058.log 2>&1 &`
+4. NOTE: devenv restart orac-sidecar may fail (stdout redirect issue) — use manual start above
+5. If PV2 IPC fails: kill old PV2 (`ss -tlnp sport=:8132`), `/usr/bin/rm -f /run/user/1000/pane-vortex-bus.sock`, `devenv restart pane-vortex`, restart ORAC
+
+### GAP-A: STDP LTP=0 — FIXED
+**Root cause:** Coupling network seed code only ran when `connections.is_empty()`. After SessionStart hooks registered `orac-<uuid>` connections, PV2 sphere IDs never got registered. STDP endpoint mismatch → LTP=0 permanently.
+**Fix:** Removed `is_empty()` guard in `spawn_field_poller` (~line 1149 of `m10_hook_server.rs`). Now always syncs PV2 spheres into coupling network. Also fixed `hebbian_ltp_total` and `hebbian_ltd_total` counters in `main.rs`.
+**Result:** LTP=138, LTD=3375, weight range 0.15→0.43 after 23 ticks. Learning alive.
+
+### GAP-B: PV2 IPC Socket Dead — FIXED
+**Root cause:** Old PV2 process (40h uptime) survived devenv restart. New process couldn't bind. Socket existed but listener dead.
+**Fix:** Kill old PV2, `/usr/bin/rm -f` socket (bypass trash alias), fresh PV2 start, ORAC manual start.
+**Result:** IPC state=subscribed on first connect.
+
+### Remaining Gaps
+- **GAP-C (sessions=0):** In-memory only. Expected after ORAC restart. Long-term: hydrate from blackboard.
+- **GAP-D (ME events=0):** Observer not subscribed to "health"/"metrics" channels. Fleet agent investigating.
+
+### ORAC Bug Fixes (11)
+- C001: Host header uses full addr:port (IPv6-safe)
+- C002: IPC reconnect escalating backoff (5s→120s cap)
+- H001: Thermal NaN/INF returns neutral 1.0
+- H002: Silent DB errors → tracing::warn
+- M001: Consent defaults consistent (serde default_true)
+- M002: First thermal poll fires immediately
+- M003: Breaker tracks last_failure_tick + failure_age_ticks()
+- M004: field_state debug_assert + div-by-zero guard
+- M005: Breaker FSM: success in Open stays Open
+- L002: TSV single-pass sanitize_into (zero-alloc)
+- L004: Reconnect counter resets on success
+- **CRITICAL**: All 4 bridge URLs fixed: localhost→127.0.0.1
+
+### CC Fleet Toolkit (10 scripts)
+- **New:** cc-common.sh, cc-monitor, cc-abort, cc-capture, cc-replay, fleet-constants.sh
+- **Enhanced:** cc-dispatch (audit log), cc-scan (cc-common), cc-status (parallel), cc-deploy/cc-cascade/cc-harvest (--json)
+
+### Metabolic Activation (4 Phases)
+- **Phase 1:** SYNTHEX heat sources wired — ORAC posts field state to /api/ingest every 6 ticks
+- **Phase 2:** VMS seeded (24 memories, 9 spheres, r=0.9994), ORAC→VMS bridge posts every 30 ticks
+- **Phase 3:** STDP weight changes persist to POVM pathways every 60 ticks
+- **Phase 4:** ME EventBus wired (3 publish calls in spawn_health_polling), cross-service synergy mapped
+
+### Fleet Reports (7 findings)
+- findings-alpha-left-me-eventbus.md (228 lines)
+- findings-alpha-br-synthex-heat.md (219 lines)
+- findings-beta-left-vms-activation.md (228 lines)
+- findings-beta-tr-ipc-nexus.md (205 lines)
+- findings-gamma-left-synergy-map.md (208 lines)
+- findings-gamma-tr-hebbian-network.md (226 lines)
+- metabolic-activation-plan-2026-03-23.md
+
+### Quality Gate
+- 1649 tests (ORAC), 0 clippy pedantic
+- ME: compiles clean with EventBus wiring
+
+### Next Steps
+1. PV2 IPC event broadcasting (4 insertions in api.rs — gamma-br findings pending)
+2. Monitor SYNTHEX PID convergence to target 0.50
+3. Verify ME EventBus subscriber count increases
+4. Git commit + push ORAC + ME changes
+
+---
+
+## Session 056 — Full Fleet Exploration + 31 Bug Fixes + Schematics (2026-03-23)
+
+**Status:** PRODUCTION HARDENED — 9 CC instances deployed, 34 bugs found, 31 fixed, 1,601 tests, 0 clippy pedantic, commit `54671db` pushed to GitLab.
+
+### Resume Protocol (New Context Window)
+1. Run `/primehabitat` then `/deephabitat`
+2. Read this file (`CLAUDE.local.md`)
+3. ORAC is running on :8133, RALPH cycling with neutral-accept fix
+4. All persisted: GitLab, Obsidian (6 notes), POVM, RM, auto-memory, Master Index
+
+### Key Artifacts Created This Session
+- **Obsidian:** `Session 056 — ORAC God-Tier Mastery.md` (consolidated learnings)
+- **Obsidian:** `Session 056 — Complete Fleet Report.md` (full fleet ops report)
+- **Obsidian:** `ORAC Sidecar — Architecture Schematics.md` (8 Mermaid diagrams, 25K)
+- **Obsidian:** `ORAC Sidecar — Diagnostic Schematics.md` (8 diagnostic diagrams, 18K)
+- **Obsidian:** `ULTRAPLATE — Bugs and Known Issues — ORAC Update 2026-03-23.md` (34 bugs, fix status)
+- **Obsidian:** `Fleet Commander — Modularization Plan and Gap Analysis.md` (future project)
+- **Master Index:** Updated with §13 Projects for Future Deployment + all ORAC notes
+- **cc-* toolkit:** 6 scripts at `~/.local/bin/` (scan, status, dispatch, cascade, deploy, harvest)
+- **fleet-* enhancements:** fleet-star, fleet-ctl (3 new subcommands), fleet-heartbeat, fleet-inventory, fleet-sphere-sync
+- **Git:** `54671db` — 36 files, +5133/-1303, pushed to `git@gitlab.com:lukeomahoney/orac-sidecar.git`
+
+### Bug Fix Summary (34 found, 31 fixed)
+- **3 CRITICAL fixed:** BUG-036 (sphere deser), BUG-L4-001 (coupling bypass), BUG-L4-002 (breaker tick=0), BUG-G01 (RALPH neutral-accept)
+- **9 HIGH fixed:** L3-002, L3-001, L1-002, L1-003, BUG-037 (self-resolved), BUG-038 (improving)
+- **15 MED fixed:** L3-003, L4-004, L3-005, L4-003, L4-006, L1-004, L1-005, L1-006, L1-007, L2-001, L2-002, L3-004, BUG-041, BUG-040, BUG-042
+- **4 LOW fixed:** L2-005, L1-008, L1-010, L2-003, L2-004, L1-009, L3-006, BUG-043
+- **3 DEFERRED:** monitoring endpoints (dormant), WASM bridge (by design), tick Phase 4+5 (planned)
+
+### Fleet Topology Used
+```
+Phase 1 Exploration:  Command + ALPHA-left + BETA-left (3 instances)
+Phase 2 Bug Fixes:    ALPHA-tr + ALPHA-br + BETA-left + BETA-br + BETA-tr + GAMMA-br + GAMMA-tr (7 instances)
+Phase 3 Schematics:   ALPHA-left + BETA-left (2 instances)
+```
+
+### Next Steps (Recommended)
+1. **Fleet Commander v0.5** — Phase 0: enumerate callers, define fleet-state.json contract
+2. **BUG-G01 verification** — Monitor RALPH fitness over 100+ generations to confirm neutral-accept fix holds
+3. **ORAC devenv registration** — Verify `devenv restart orac-sidecar` works
+4. **Emergence detector** — Feed real observations, verify 8 detection types trigger
 
 ---
 

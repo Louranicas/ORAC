@@ -49,6 +49,12 @@ use crate::m5_bridges::m26_blackboard::Blackboard;
 use crate::m4_intelligence::m15_coupling_network::CouplingNetwork;
 #[cfg(feature = "intelligence")]
 use crate::m4_intelligence::m21_circuit_breaker::{BreakerConfig, BreakerRegistry};
+#[cfg(feature = "bridges")]
+use crate::m5_bridges::m22_synthex_bridge::SynthexBridge;
+#[cfg(feature = "bridges")]
+use crate::m5_bridges::m23_me_bridge::MeBridge;
+#[cfg(feature = "bridges")]
+use crate::m5_bridges::m25_rm_bridge::RmBridge;
 
 /// Maximum ghost traces retained (FIFO eviction beyond this).
 const MAX_GHOSTS: usize = 20;
@@ -76,13 +82,23 @@ fn open_blackboard() -> Option<Mutex<Blackboard>> {
     let orac_dir = dir.join("orac");
     let _ = std::fs::create_dir_all(&orac_dir);
     let path = orac_dir.join("blackboard.db");
-    match Blackboard::open(&path.to_string_lossy()) {
-        Ok(bb) => Some(Mutex::new(bb)),
-        Err(e) => {
-            tracing::warn!("blackboard open failed: {e}");
-            None
+    // BUG-GEN17: Retry with backoff (3 attempts, 100ms/200ms/400ms)
+    let path_str = path.to_string_lossy();
+    for attempt in 0..3u32 {
+        match Blackboard::open(&path_str) {
+            Ok(bb) => return Some(Mutex::new(bb)),
+            Err(e) => {
+                if attempt < 2 {
+                    let delay = 100_u64 * (1_u64 << attempt);
+                    tracing::debug!("blackboard open attempt {}: {e} — retrying in {delay}ms", attempt + 1);
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                } else {
+                    tracing::warn!("blackboard open failed after 3 attempts: {e} — persistence disabled");
+                }
+            }
         }
     }
+    None
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -100,22 +116,47 @@ const fn default_true() -> bool { true }
 #[allow(clippy::struct_excessive_bools)] // consent fields are inherently boolean
 pub struct OracConsent {
     /// Allow SYNTHEX bridge to write data for this sphere.
+    ///
+    /// BUG-M001 fix: defaults to `true` to match `fully_open()` semantics.
+    #[serde(default = "default_true")]
     pub synthex_write: bool,
     /// Allow POVM bridge to read data for this sphere.
+    #[serde(default = "default_true")]
     pub povm_read: bool,
     /// Allow POVM bridge to write data for this sphere.
+    ///
+    /// Intentionally defaults to `false` — POVM writes are opt-in only.
+    /// BUG-057b fix: explicit `#[serde(default)]` so partial JSON deserializes
+    /// correctly instead of failing when `povm_write` is omitted.
+    #[serde(default)]
     pub povm_write: bool,
     /// Allow Reasoning Memory bridge to write data for this sphere.
     #[serde(default = "default_true")]
     pub rm_write: bool,
     /// Allow session hydration from POVM + RM on `SessionStart`.
+    #[serde(default = "default_true")]
     pub hydration: bool,
     /// Epoch milliseconds when this consent was last updated.
+    /// BUG-GEN03 fix: add `#[serde(default)]` so partial JSON without
+    /// `updated_ms` deserializes (defaults to 0, then overwritten by `fully_open()`).
+    #[serde(default)]
     pub updated_ms: u64,
 }
 
+/// Sentinel timestamp for uncommitted default consents.
+///
+/// A value of 0 indicates this consent was never explicitly updated --
+/// it is the read-only default. Real timestamps are only assigned
+/// when consent is explicitly updated via `update_consent()`.
+pub const CONSENT_DEFAULT_TIMESTAMP: u64 = 0;
+
 impl OracConsent {
     /// Create a fully-open consent (default for new spheres).
+    ///
+    /// Uses [`CONSENT_DEFAULT_TIMESTAMP`] (0) rather than the current time,
+    /// because this is a read-only default -- not an explicit user action.
+    /// The `updated_ms` field only gets a real timestamp when consent is
+    /// explicitly updated via [`OracState::update_consent`].
     #[must_use]
     pub fn fully_open() -> Self {
         Self {
@@ -124,7 +165,7 @@ impl OracConsent {
             povm_write: false,
             rm_write: true,
             hydration: true,
-            updated_ms: epoch_ms(),
+            updated_ms: CONSENT_DEFAULT_TIMESTAMP,
         }
     }
 }
@@ -261,17 +302,24 @@ impl HookResponse {
 
 /// Health check response for the `/health` endpoint.
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // Health response legitimately reports multiple boolean states
 pub struct HealthResponse {
     /// Service status.
     pub status: &'static str,
     /// Service name.
     pub service: &'static str,
+    /// Crate version string.
+    pub version: &'static str,
     /// Listening port.
     pub port: u16,
     /// Number of tracked sessions.
     pub sessions: usize,
     /// Uptime tick counter.
     pub uptime_ticks: u64,
+    /// Cached PV2 field coherence (Kuramoto order parameter r). BUG-GEN19.
+    pub field_r: f64,
+    /// Number of spheres in the cached field state. BUG-GEN19.
+    pub sphere_count: usize,
     /// RALPH evolution generation counter.
     #[cfg(feature = "evolution")]
     pub ralph_gen: u64,
@@ -281,13 +329,71 @@ pub struct HealthResponse {
     /// RALPH current fitness score.
     #[cfg(feature = "evolution")]
     pub ralph_fitness: f64,
+    /// Whether RALPH has converged (fitness variance < 0.001 over 50 gens).
+    #[cfg(feature = "evolution")]
+    pub ralph_converged: bool,
     /// IPC bus connection state (`"disconnected"`, `"connecting"`, `"connected"`).
     pub ipc_state: String,
     /// Circuit breaker states per bridge (service name -> state string).
     #[cfg(feature = "intelligence")]
     pub breakers: serde_json::Value,
+    /// SYNTHEX thermal temperature (cached from bridge poll).
+    #[cfg(feature = "bridges")]
+    pub thermal_temperature: f64,
+    /// SYNTHEX thermal target setpoint.
+    #[cfg(feature = "bridges")]
+    pub thermal_target: f64,
+    /// ME fitness from last observer poll.
+    #[cfg(feature = "bridges")]
+    pub me_fitness: f64,
+    /// Whether ME fitness is detected as frozen (BUG-008).
+    #[cfg(feature = "bridges")]
+    pub me_frozen: bool,
+    /// Whether ORAC is actively subscribed to the ME observer.
+    #[cfg(feature = "bridges")]
+    pub me_observer_subscribed: bool,
+    /// ME total correlations found (metabolic activity indicator).
+    #[cfg(feature = "bridges")]
+    pub me_total_correlations: u64,
+    /// ME total events ingested (cross-service data flow indicator).
+    #[cfg(feature = "bridges")]
+    pub me_total_events: u64,
     /// Total semantic routing dispatches.
     pub dispatch_total: u64,
+    /// Number of coupling network connections.
+    #[cfg(feature = "intelligence")]
+    pub coupling_connections: usize,
+    /// Mean coupling weight across all connections.
+    #[cfg(feature = "intelligence")]
+    pub coupling_weight_mean: f64,
+    /// Coupling weight range `[min, max]`.
+    #[cfg(feature = "intelligence")]
+    pub coupling_weight_range: [f64; 2],
+    /// Total co-activation events (Hebbian LTP triggers).
+    #[cfg(feature = "intelligence")]
+    pub co_activations_total: u64,
+    /// Total Hebbian LTP (Long-Term Potentiation) events.
+    /// BUG-GEN13: Added for cc-status STDP dashboard.
+    #[cfg(feature = "intelligence")]
+    pub hebbian_ltp_total: u64,
+    /// Emergence events total detected.
+    #[cfg(feature = "evolution")]
+    pub emergence_events: u64,
+    /// Emergence active monitors count.
+    #[cfg(feature = "evolution")]
+    pub emergence_active_monitors: usize,
+    /// Total Hebbian LTD (Long-Term Depression) events.
+    #[cfg(feature = "intelligence")]
+    pub hebbian_ltd_total: u64,
+    /// Last tick when Hebbian STDP ran.
+    #[cfg(feature = "intelligence")]
+    pub hebbian_last_tick: u64,
+    /// T5: Whether SYNTHEX bridge data is stale (no successful poll recently).
+    #[cfg(feature = "bridges")]
+    pub synthex_stale: bool,
+    /// T5: Whether RM bridge data is stale.
+    #[cfg(feature = "bridges")]
+    pub rm_stale: bool,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -366,6 +472,27 @@ pub struct OracState {
     pub dispatch_execute: AtomicU64,
     /// Dispatch counter for `Communicate` domain tasks.
     pub dispatch_communicate: AtomicU64,
+    /// Total co-activation events detected (BUG-059 fix).
+    pub co_activations_total: AtomicU64,
+    /// Accumulated Hebbian LTP event count (BUG-GEN13).
+    pub hebbian_ltp_total: AtomicU64,
+    /// Accumulated Hebbian LTD event count (BUG-GEN13).
+    pub hebbian_ltd_total: AtomicU64,
+    /// Last tick when STDP ran (BUG-GEN13).
+    pub hebbian_last_tick: AtomicU64,
+    /// ME bridge for fitness polling and observer data (feature-gated).
+    #[cfg(feature = "bridges")]
+    pub me_bridge: MeBridge,
+    /// RM bridge for cross-session TSV persistence (feature-gated).
+    #[cfg(feature = "bridges")]
+    pub rm_bridge: RmBridge,
+    /// Global tool call counter for cascade heat computation.
+    pub total_tool_calls: AtomicU64,
+    /// Tool call snapshot at last thermal post (for rate calculation).
+    pub tool_calls_at_last_thermal: AtomicU64,
+    /// SYNTHEX bridge for thermal polling and field state posting (feature-gated).
+    #[cfg(feature = "bridges")]
+    pub synthex_bridge: SynthexBridge,
     /// In-process trace store for `OTel`-style span recording (feature-gated).
     #[cfg(feature = "monitoring")]
     pub trace_store: crate::m7_monitoring::m32_otel_traces::TraceStore,
@@ -405,6 +532,18 @@ impl OracState {
             dispatch_write: AtomicU64::new(0),
             dispatch_execute: AtomicU64::new(0),
             dispatch_communicate: AtomicU64::new(0),
+            co_activations_total: AtomicU64::new(0),
+            hebbian_ltp_total: AtomicU64::new(0),
+            hebbian_ltd_total: AtomicU64::new(0),
+            hebbian_last_tick: AtomicU64::new(0),
+            total_tool_calls: AtomicU64::new(0),
+            tool_calls_at_last_thermal: AtomicU64::new(0),
+            #[cfg(feature = "bridges")]
+            synthex_bridge: SynthexBridge::new(),
+            #[cfg(feature = "bridges")]
+            me_bridge: MeBridge::new(),
+            #[cfg(feature = "bridges")]
+            rm_bridge: RmBridge::new(),
             #[cfg(feature = "monitoring")]
             trace_store: crate::m7_monitoring::m32_otel_traces::TraceStore::new(),
             #[cfg(feature = "monitoring")]
@@ -447,6 +586,18 @@ impl OracState {
             dispatch_write: AtomicU64::new(0),
             dispatch_execute: AtomicU64::new(0),
             dispatch_communicate: AtomicU64::new(0),
+            co_activations_total: AtomicU64::new(0),
+            hebbian_ltp_total: AtomicU64::new(0),
+            hebbian_ltd_total: AtomicU64::new(0),
+            hebbian_last_tick: AtomicU64::new(0),
+            total_tool_calls: AtomicU64::new(0),
+            tool_calls_at_last_thermal: AtomicU64::new(0),
+            #[cfg(feature = "bridges")]
+            synthex_bridge: SynthexBridge::new(),
+            #[cfg(feature = "bridges")]
+            me_bridge: MeBridge::new(),
+            #[cfg(feature = "bridges")]
+            rm_bridge: RmBridge::new(),
             #[cfg(feature = "monitoring")]
             trace_store: crate::m7_monitoring::m32_otel_traces::TraceStore::new(),
             #[cfg(feature = "monitoring")]
@@ -726,11 +877,24 @@ impl OracState {
 
         let mut tensor = TensorValues::uniform(0.5); // neutral baseline
 
-        // D1: field_coherence — from cached field state
+        // D1: field_coherence — from cached field state, weighted by stability.
+        // Gen-059g: Raw r weighted by inverse stddev. Low variance (stable r)
+        // produces higher coherence score, rewarding Kuramoto stability.
         {
             let guard = self.field_state.read();
             let r = guard.field.order.r;
-            tensor.set(FitnessDimension::FieldCoherence, r.clamp(0.0, 1.0));
+            #[cfg(feature = "monitoring")]
+            let stability_bonus = {
+                let stddev = self.dashboard.r_stddev();
+                // stddev 0.0 → 1.0 bonus, stddev 0.15+ → 0.0 bonus
+                if stddev.is_finite() { (1.0 - stddev / 0.15).clamp(0.0, 1.0) * 0.1 } else { 0.0 }
+            };
+            #[cfg(not(feature = "monitoring"))]
+            let stability_bonus = 0.0;
+            tensor.set(
+                FitnessDimension::FieldCoherence,
+                (r + stability_bonus).clamp(0.0, 1.0),
+            );
         }
 
         // D9, D3, D4: from blackboard (if available)
@@ -752,6 +916,8 @@ impl OracState {
                 tensor.set(FitnessDimension::FleetUtilization, utilization);
 
                 // D3: task_throughput — avg tasks_completed per pane (capped at 1.0 for 10+ tasks)
+                // Sum is at most 9*u64::MAX which exceeds f64 precision, but fleet has <=9 panes
+                // with tasks_completed typically <1000, so precision loss is negligible.
                 #[allow(clippy::cast_precision_loss)]
                 let avg_tasks = panes.iter().map(|p| p.tasks_completed).sum::<u64>() as f64
                     / total_panes as f64;
@@ -797,13 +963,17 @@ impl OracState {
 #[cfg(feature = "intelligence")]
 fn init_breaker_registry() -> BreakerRegistry {
     let mut reg = BreakerRegistry::new(BreakerConfig::default());
-    // BUG-038 fix: aggressive() tripped too easily on transient failures.
-    // PV2 is a local service — default config (threshold=5, timeout=30) is sufficient.
-    reg.register(PaneId::new("pv2"), BreakerConfig::default());
+    // PV2 is local — use tolerant config (threshold=10, timeout=15) since
+    // transient failures are common during sphere churn and the poller
+    // ticks breakers from both field_poller and RALPH loop (2x speed).
+    reg.register(PaneId::new("pv2"), BreakerConfig::tolerant());
     reg.register(PaneId::new("synthex"), BreakerConfig::default());
     reg.register(PaneId::new("me"), BreakerConfig::tolerant());
     reg.register(PaneId::new("povm"), BreakerConfig::default());
     reg.register(PaneId::new("rm"), BreakerConfig::default());
+    // T4: VMS breaker — tolerant config (10 fail / 3 success / 10 tick timeout)
+    // to minimize data gaps during recovery (per Critic 2 recommendation).
+    reg.register(PaneId::new("vms"), BreakerConfig::tolerant());
     reg
 }
 
@@ -827,8 +997,9 @@ pub fn fire_and_forget_post(url: String, body: String) {
         .await;
         match result {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::debug!("fire-and-forget POST failed: {e}"),
-            Err(e) => tracing::debug!("fire-and-forget task panicked: {e}"),
+            // T2 fix: upgrade debug→warn so transport errors are visible in production
+            Ok(Err(e)) => tracing::warn!("fire_and_forget_post failed: {e}"),
+            Err(e) => tracing::warn!("fire_and_forget_post task panicked: {e}"),
         }
     });
 }
@@ -856,7 +1027,27 @@ pub fn breaker_guarded_post(state: &Arc<OracState>, service: &str, url: String, 
         .await;
         match result {
             Ok(Ok(_)) => state_clone.breaker_success(&service_name),
-            _ => state_clone.breaker_failure(&service_name),
+            Ok(Err(e)) => {
+                // BUG-059d fix: Only record breaker failure for transport
+                // errors and 5xx server errors. 4xx client errors (e.g.,
+                // 404 Not Found on /sphere/{id}/memory) indicate a missing
+                // endpoint, not a service health issue. Without this guard,
+                // PostToolUse 404s continuously trip the PV2 breaker.
+                let is_health_failure =
+                    !matches!(&*e, ureq::Error::Status(c, _) if *c < 500);
+                if is_health_failure {
+                    state_clone.breaker_failure(&service_name);
+                }
+                tracing::debug!(
+                    service = %service_name,
+                    breaker_trip = is_health_failure,
+                    "guarded POST error: {e}"
+                );
+            }
+            Err(_) => {
+                // spawn_blocking panicked — treat as health failure
+                state_clone.breaker_failure(&service_name);
+            }
         }
     });
 }
@@ -880,8 +1071,8 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
 
             // Fetch health and spheres in parallel
             let (health_resp, spheres_resp) = tokio::join!(
-                http_get(&health_url, 2000),
-                http_get(&spheres_url, 2000),
+                http_get(&health_url, 5000),
+                http_get(&spheres_url, 5000),
             );
 
             // BUG-038 fix: advance breaker ticks from poller (every 5s)
@@ -899,6 +1090,11 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
             };
 
             let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&health_json) else {
+                // BUG-GEN01 fix: JSON parse failure must record breaker failure,
+                // not silently continue (state leak — breaker never transitions).
+                #[cfg(feature = "intelligence")]
+                state.breaker_failure("pv2");
+                tracing::debug!("field poller: PV2 health JSON parse failed");
                 continue;
             };
 
@@ -992,7 +1188,8 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                 guard.record_poll_success();
             }
 
-            // BUG-043 fix: Update dashboard with field state on each poll tick
+            // BUG-043 + BUG-GEN09 fix: Update dashboard with field state AND
+            // sphere phase data on each poll tick.
             #[cfg(feature = "monitoring")]
             {
                 let guard = state.field_state.read();
@@ -1005,12 +1202,84 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                     &guard.field.order,
                     k_eff,
                 );
+
+                // BUG-GEN09: Populate phase entries from cached sphere data
+                let phases: Vec<_> =
+                    guard.spheres.iter().map(|(pid, sp)| {
+                        crate::m7_monitoring::m34_field_dashboard::SpherePhaseEntry {
+                            pane_id: pid.clone(),
+                            phase: sp.phase,
+                            frequency: sp.frequency,
+                            status: format!("{:?}", sp.status),
+                            cluster: None,
+                        }
+                    }).collect();
+                if !phases.is_empty() {
+                    state.dashboard.set_phases(phases);
+                }
             }
 
-            // BUG-038 fix: record PV2 success against breaker.
-            // The field poller proves PV2 is healthy — keep breaker Closed.
+            // GAP-A fix: Always sync PV2 sphere IDs into the coupling network.
+            // Session-driven registration uses `orac-<uuid>` IDs, but STDP checks
+            // connection endpoints against `field_state.spheres` (which has PV2 IDs
+            // like `fleet-alpha`). Without this sync, STDP never finds matching
+            // endpoints and LTP stays at 0. The `phases.contains_key` guard
+            // prevents double-registration of already-known spheres.
+            {
+                let guard = state.field_state.read();
+                if guard.spheres.len() >= 2 {
+                    let mut net = state.coupling.write();
+                    let mut registered = 0u32;
+                    for (pid, sphere) in &guard.spheres {
+                        if !net.phases.contains_key(pid) {
+                            net.register(
+                                pid.clone(),
+                                sphere.phase,
+                                sphere.frequency.max(0.1),
+                            );
+                            registered += 1;
+                        }
+                    }
+                    // Prune coupling entries not in PV2 sphere set AND not
+                    // active orac:* sessions. Prevents phantom connections from
+                    // diluting STDP with deregistered spheres.
+                    let active_sessions: std::collections::HashSet<PaneId> =
+                        state.sessions.read().values().map(|s| s.pane_id.clone()).collect();
+                    let expired: Vec<PaneId> = net
+                        .phases
+                        .keys()
+                        .filter(|id| {
+                            !guard.spheres.contains_key(*id)
+                                && !active_sessions.contains(*id)
+                        })
+                        .cloned()
+                        .collect();
+                    for id in &expired {
+                        net.deregister(id);
+                    }
+
+                    if registered > 0 || !expired.is_empty() {
+                        tracing::info!(
+                            registered,
+                            pruned = expired.len(),
+                            total_spheres = guard.spheres.len(),
+                            connections = net.connections.len(),
+                            "Coupling network synced with PV2 spheres"
+                        );
+                    }
+                }
+            }
+
+            // BUG-059c fix: PV2 poll succeeded — advance breaker tick FIRST
+            // to trigger Open→HalfOpen transition, THEN record success
+            // (which transitions HalfOpen→Closed if threshold met).
+            // Without this, breaker_success is a no-op in Open state
+            // (BUG-M005) and the breaker stays stuck Open indefinitely.
             #[cfg(feature = "intelligence")]
-            state.breaker_success("pv2");
+            {
+                state.breaker_tick();
+                state.breaker_success("pv2");
+            }
 
             tracing::trace!(r, pv2_tick, "field state updated from PV2");
         }
@@ -1072,6 +1341,7 @@ pub fn generate_pane_id() -> PaneId {
 // ──────────────────────────────────────────────────────────────
 
 /// Health check handler.
+#[allow(clippy::too_many_lines)] // Struct initialization for 30+ fields across 6 feature gates
 async fn health_handler(
     State(state): State<Arc<OracState>>,
 ) -> Json<HealthResponse> {
@@ -1081,26 +1351,110 @@ async fn health_handler(
     Json(HealthResponse {
         status: "healthy",
         service: "orac-sidecar",
+        version: env!("CARGO_PKG_VERSION"),
         port: state.config.server.port,
         sessions: state.session_count(),
         uptime_ticks: state.tick.load(Ordering::Relaxed),
+        field_r: state.field_state.read().field.order.r,
+        sphere_count: state.field_state.read().spheres.len(),
         #[cfg(feature = "evolution")]
         ralph_gen: ralph_state.generation,
         #[cfg(feature = "evolution")]
         ralph_phase: ralph_state.phase.to_string(),
         #[cfg(feature = "evolution")]
         ralph_fitness: ralph_state.current_fitness,
+        #[cfg(feature = "evolution")]
+        ralph_converged: ralph_state.paused,
         ipc_state: state.ipc_state.read().clone(),
         #[cfg(feature = "intelligence")]
         breakers: {
             let summaries = state.breakers.read().all_summaries();
-            let map: std::collections::HashMap<String, String> = summaries
+            // BUG-057o: include failure/success counts for diagnostics
+            let map: std::collections::HashMap<String, serde_json::Value> = summaries
                 .iter()
-                .map(|(id, s)| (id.as_str().to_owned(), s.state.to_string()))
+                .map(|(id, s)| {
+                    (
+                        id.as_str().to_owned(),
+                        serde_json::json!({
+                            "state": s.state.to_string(),
+                            "failures": s.total_failures,
+                            "successes": s.total_successes,
+                            "consecutive_failures": s.consecutive_failures,
+                        }),
+                    )
+                })
                 .collect();
             serde_json::to_value(map).unwrap_or_default()
         },
+        #[cfg(feature = "bridges")]
+        me_fitness: state.me_bridge.last_fitness(),
+        #[cfg(feature = "bridges")]
+        me_frozen: state.me_bridge.is_frozen(),
+        #[cfg(feature = "bridges")]
+        me_observer_subscribed: state.me_bridge.is_subscribed(),
+        #[cfg(feature = "bridges")]
+        me_total_correlations: state
+            .me_bridge
+            .last_response()
+            .map_or(0, |r| r.total_correlations),
+        #[cfg(feature = "bridges")]
+        me_total_events: state
+            .me_bridge
+            .last_response()
+            .map_or(0, |r| r.total_events),
         dispatch_total: state.dispatch_total.load(Ordering::Relaxed),
+        #[cfg(feature = "bridges")]
+        thermal_temperature: state
+            .synthex_bridge
+            .last_response()
+            .map_or(0.0, |r| r.temperature),
+        #[cfg(feature = "bridges")]
+        thermal_target: state
+            .synthex_bridge
+            .last_response()
+            .map_or(0.5, |r| r.target),
+        #[cfg(feature = "intelligence")]
+        coupling_connections: state.coupling.read().connections.len(),
+        #[cfg(feature = "intelligence")]
+        coupling_weight_mean: {
+            let conns = &state.coupling.read().connections;
+            if conns.is_empty() {
+                0.0
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                let mean = conns.iter().map(|c| c.weight).sum::<f64>() / conns.len() as f64;
+                mean
+            }
+        },
+        #[cfg(feature = "intelligence")]
+        coupling_weight_range: {
+            let conns = &state.coupling.read().connections;
+            if conns.is_empty() {
+                [0.0, 0.0]
+            } else {
+                let min = conns.iter().map(|c| c.weight).fold(f64::INFINITY, f64::min);
+                let max = conns.iter().map(|c| c.weight).fold(f64::NEG_INFINITY, f64::max);
+                [min, max]
+            }
+        },
+        #[cfg(feature = "intelligence")]
+        co_activations_total: state.co_activations_total.load(Ordering::Relaxed),
+        // Hebbian STDP counters (BUG-GEN13: wired from OracState atomics)
+        #[cfg(feature = "evolution")]
+        emergence_events: state.ralph.emergence().stats().total_detected,
+        #[cfg(feature = "evolution")]
+        emergence_active_monitors: state.ralph.emergence().active_monitor_count(),
+        #[cfg(feature = "intelligence")]
+        hebbian_ltp_total: state.hebbian_ltp_total.load(Ordering::Relaxed),
+        #[cfg(feature = "intelligence")]
+        hebbian_ltd_total: state.hebbian_ltd_total.load(Ordering::Relaxed),
+        #[cfg(feature = "intelligence")]
+        hebbian_last_tick: state.hebbian_last_tick.load(Ordering::Relaxed),
+        // T5: Bridge staleness flags — derived from existing bridge state
+        #[cfg(feature = "bridges")]
+        synthex_stale: state.synthex_bridge.last_response().is_none(),
+        #[cfg(feature = "bridges")]
+        rm_stale: false, // RM has no poll state; always considered fresh if reachable
     })
 }
 
@@ -1190,6 +1544,49 @@ struct BlackboardQuery {
 /// Blackboard handler — returns session tracking + persistent fleet state.
 ///
 /// Merges in-memory session data with `SQLite` blackboard (pane status,
+/// Thermal proxy handler — returns enriched SYNTHEX thermal state.
+///
+/// Reads the cached SYNTHEX bridge thermal response and enriches it with
+/// ORAC-side metadata: last post tick, bridge health, consecutive failures.
+async fn thermal_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    #[cfg(feature = "bridges")]
+    {
+        let last_resp = state.synthex_bridge.last_response();
+        let failures = state.synthex_bridge.consecutive_failures();
+        let last_poll = state.synthex_bridge.last_poll_tick();
+
+        if let Some(resp) = last_resp {
+            Json(serde_json::json!({
+                "source": "orac_cache",
+                "temperature": resp.temperature,
+                "target": resp.target,
+                "pid_output": resp.pid_output,
+                "heat_sources": resp.heat_sources,
+                "k_adjustment": resp.thermal_adjustment(),
+                "bridge_consecutive_failures": failures,
+                "last_poll_tick": last_poll,
+                "orac_tick": state.tick.load(Ordering::Relaxed),
+            }))
+        } else {
+            Json(serde_json::json!({
+                "source": "orac_cache",
+                "error": "no thermal data cached — bridge not yet polled",
+                "bridge_consecutive_failures": failures,
+                "last_poll_tick": last_poll,
+                "orac_tick": state.tick.load(Ordering::Relaxed),
+            }))
+        }
+    }
+    #[cfg(not(feature = "bridges"))]
+    {
+        Json(serde_json::json!({
+            "error": "bridges feature not enabled"
+        }))
+    }
+}
+
 /// agent cards, task history). Supports query filters:
 /// - `?status=Working` — only panes with this status
 /// - `?since=1711100000` — only panes updated after this timestamp
@@ -1560,6 +1957,14 @@ async fn consent_get_handler(
     State(state): State<Arc<OracState>>,
     Path(sphere_id): Path<String>,
 ) -> Json<serde_json::Value> {
+    // BUG-057n: validate sphere_id format (alphanumeric + colon + dash + underscore, max 128 chars)
+    if sphere_id.len() > 128
+        || !sphere_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_' || c == '.')
+    {
+        return Json(serde_json::json!({"error": "invalid sphere_id format"}));
+    }
     let consent = state.get_consent(&sphere_id);
     Json(serde_json::json!({
         "sphere_id": sphere_id,
@@ -1582,6 +1987,14 @@ async fn consent_put_handler(
     Path(sphere_id): Path<String>,
     Json(body): Json<ConsentUpdateRequest>,
 ) -> Json<serde_json::Value> {
+    // BUG-057n: validate sphere_id format
+    if sphere_id.len() > 128
+        || !sphere_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_' || c == '.')
+    {
+        return Json(serde_json::json!({"error": "invalid sphere_id format"}));
+    }
     let updated = state.update_consent(&sphere_id, &body);
 
     // Fire-and-forget: notify PV2 of consent change
@@ -1703,6 +2116,127 @@ async fn tokens_handler() -> Json<serde_json::Value> {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Diagnostic handlers (G3 — metabolic observability)
+// ──────────────────────────────────────────────────────────────
+
+/// Coupling network stats: connection count, weight distribution, saturation.
+async fn coupling_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let net = state.coupling.read();
+    let count = net.connections.len();
+    if count == 0 {
+        return Json(serde_json::json!({ "connections": 0 }));
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let n = count as f64;
+    let w_mean = net.connections.iter().map(|c| c.weight).sum::<f64>() / n;
+    let (w_min, w_max) = net.connections.iter().fold(
+        (f64::MAX, f64::MIN),
+        |(lo, hi), c| (lo.min(c.weight), hi.max(c.weight)),
+    );
+    let floor = crate::m1_core::m04_constants::HEBBIAN_WEIGHT_FLOOR;
+    let at_floor = net.connections.iter().filter(|c| (c.weight - floor).abs() < 0.01).count();
+    let at_ceiling = net.connections.iter().filter(|c| (c.weight - 1.0).abs() < 0.01).count();
+    #[allow(clippy::cast_precision_loss)]
+    let saturation_pct = (at_floor + at_ceiling) as f64 / n * 100.0;
+    Json(serde_json::json!({
+        "connections": count,
+        "weight_mean": w_mean,
+        "weight_min": w_min,
+        "weight_max": w_max,
+        "at_floor": at_floor,
+        "at_ceiling": at_ceiling,
+        "saturation_pct": saturation_pct,
+        "k_modulation": net.k_modulation,
+    }))
+}
+
+/// Hebbian STDP stats: LTP/LTD totals, co-activations, learning ratio.
+async fn hebbian_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    let ltp = state.hebbian_ltp_total.load(Ordering::Relaxed);
+    let ltd = state.hebbian_ltd_total.load(Ordering::Relaxed);
+    let co_act = state.co_activations_total.load(Ordering::Relaxed);
+    #[allow(clippy::cast_precision_loss)]
+    let ratio = if ltd > 0 { ltp as f64 / ltd as f64 } else { 0.0 };
+    Json(serde_json::json!({
+        "ltp_total": ltp,
+        "ltd_total": ltd,
+        "ltp_ltd_ratio": ratio,
+        "co_activations_total": co_act,
+        "target_ratio": 0.15,
+    }))
+}
+
+/// Emergence detector stats: event counts by type, active monitors.
+async fn emergence_handler(
+    State(orac): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let em_summary = orac.ralph.emergence().stats();
+    let monitors = orac.ralph.emergence().active_monitor_count();
+    Json(serde_json::json!({
+        "total_detected": em_summary.total_detected,
+        "active_monitors": monitors,
+        "by_type": em_summary.by_type,
+    }))
+}
+
+/// Bridge status: circuit breaker summary + last poll ticks.
+async fn bridges_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    #[cfg(feature = "intelligence")]
+    let (closed, open, half_open) = state.breaker_state_counts();
+    #[cfg(not(feature = "intelligence"))]
+    let (closed, open, half_open) = (0usize, 0usize, 0usize);
+
+    Json(serde_json::json!({
+        "synthex_last_poll": state.synthex_bridge.last_poll_tick(),
+        "me_fitness": state.me_bridge.last_fitness(),
+        "me_frozen": state.me_bridge.is_frozen(),
+        "ipc_state": state.get_ipc_state(),
+        "breakers_closed": closed,
+        "breakers_open": open,
+        "breakers_half_open": half_open,
+    }))
+}
+
+/// RALPH evolution status: generation, fitness, phase, mutations.
+async fn ralph_handler(
+    State(orac): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let ralph_snap = orac.ralph.state();
+    let ralph_agg = orac.ralph.stats();
+    Json(serde_json::json!({
+        "generation": ralph_snap.generation,
+        "fitness": ralph_snap.current_fitness,
+        "peak_fitness": ralph_agg.peak_fitness,
+        "phase": format!("{:?}", ralph_snap.phase),
+        "paused": ralph_snap.paused,
+        "completed_cycles": ralph_snap.completed_cycles,
+        "system_state": format!("{:?}", ralph_snap.system_state),
+        "mutations_proposed": ralph_agg.total_proposed,
+        "mutations_accepted": ralph_agg.total_accepted,
+        "mutations_rolled_back": ralph_agg.total_rolled_back,
+        "mutations_skipped": ralph_agg.total_skipped,
+    }))
+}
+
+/// Dispatch stats: total dispatches, semantic router readiness.
+async fn dispatch_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    let total = state.dispatch_total.load(std::sync::atomic::Ordering::Relaxed);
+    Json(serde_json::json!({
+        "dispatch_total": total,
+        "note": "Semantic router exists but fleet dispatch not yet wired in tick loop",
+    }))
+}
+
+// ──────────────────────────────────────────────────────────────
 // Router construction
 // ──────────────────────────────────────────────────────────────
 
@@ -1714,12 +2248,19 @@ pub fn build_router(state: Arc<OracState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/field", get(field_handler))
+        .route("/thermal", get(thermal_handler))
         .route("/blackboard", get(blackboard_handler))
         .route("/metrics", get(metrics_handler))
         .route("/field/ghosts", get(field_ghosts_handler))
         .route("/traces", get(traces_handler))
         .route("/dashboard", get(dashboard_endpoint_handler))
         .route("/tokens", get(tokens_handler))
+        .route("/coupling", get(coupling_handler))
+        .route("/hebbian", get(hebbian_handler))
+        .route("/emergence", get(emergence_handler))
+        .route("/bridges", get(bridges_handler))
+        .route("/ralph", get(ralph_handler))
+        .route("/dispatch", get(dispatch_handler))
         .route(
             "/consent/{sphere_id}",
             get(consent_get_handler).put(consent_put_handler),
@@ -2003,23 +2544,63 @@ mod tests {
         let resp = HealthResponse {
             status: "healthy",
             service: "orac-sidecar",
+            version: "0.1.0",
             port: 8133,
             sessions: 3,
             uptime_ticks: 42,
+            field_r: 0.95,
+            sphere_count: 8,
             #[cfg(feature = "evolution")]
             ralph_gen: 7,
             #[cfg(feature = "evolution")]
             ralph_phase: "Recognize".into(),
             #[cfg(feature = "evolution")]
             ralph_fitness: 0.85,
+            #[cfg(feature = "evolution")]
+            ralph_converged: false,
             ipc_state: "disconnected".into(),
             #[cfg(feature = "intelligence")]
             breakers: serde_json::json!({}),
+            #[cfg(feature = "bridges")]
+            me_fitness: 0.0,
+            #[cfg(feature = "bridges")]
+            me_frozen: false,
+            #[cfg(feature = "bridges")]
+            me_observer_subscribed: false,
+            #[cfg(feature = "bridges")]
+            me_total_correlations: 0,
+            #[cfg(feature = "bridges")]
+            me_total_events: 0,
+            #[cfg(feature = "bridges")]
+            thermal_temperature: 0.0,
+            #[cfg(feature = "bridges")]
+            thermal_target: 0.5,
             dispatch_total: 0,
+            #[cfg(feature = "intelligence")]
+            coupling_connections: 0,
+            #[cfg(feature = "intelligence")]
+            coupling_weight_mean: 0.0,
+            #[cfg(feature = "intelligence")]
+            coupling_weight_range: [0.0, 0.0],
+            #[cfg(feature = "intelligence")]
+            co_activations_total: 0,
+            #[cfg(feature = "intelligence")]
+            hebbian_ltp_total: 0,
+            #[cfg(feature = "intelligence")]
+            hebbian_ltd_total: 0,
+            #[cfg(feature = "intelligence")]
+            hebbian_last_tick: 0,
+            emergence_events: 0,
+            emergence_active_monitors: 0,
+            #[cfg(feature = "bridges")]
+            synthex_stale: false,
+            #[cfg(feature = "bridges")]
+            rm_stale: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("orac-sidecar"));
         assert!(json.contains("8133"));
+        assert!(json.contains("version"));
     }
 
     #[cfg(feature = "evolution")]
@@ -2028,16 +2609,54 @@ mod tests {
         let resp = HealthResponse {
             status: "healthy",
             service: "orac-sidecar",
+            version: "0.1.0",
             port: 8133,
             sessions: 1,
             uptime_ticks: 100,
+            field_r: 0.85,
+            sphere_count: 5,
             ralph_gen: 42,
             ralph_phase: "Analyze".into(),
             ralph_fitness: 0.667,
+            ralph_converged: false,
             ipc_state: "connected".into(),
             #[cfg(feature = "intelligence")]
             breakers: serde_json::json!({"pv2": "Closed", "synthex": "Closed"}),
+            #[cfg(feature = "bridges")]
+            me_fitness: 0.62,
+            #[cfg(feature = "bridges")]
+            me_frozen: false,
+            #[cfg(feature = "bridges")]
+            me_observer_subscribed: true,
+            #[cfg(feature = "bridges")]
+            me_total_correlations: 4_000_000,
+            #[cfg(feature = "bridges")]
+            me_total_events: 368_000,
+            #[cfg(feature = "bridges")]
+            thermal_temperature: 0.5,
+            #[cfg(feature = "bridges")]
+            thermal_target: 0.5,
             dispatch_total: 5,
+            #[cfg(feature = "intelligence")]
+            coupling_connections: 2,
+            #[cfg(feature = "intelligence")]
+            coupling_weight_mean: 0.5,
+            #[cfg(feature = "intelligence")]
+            coupling_weight_range: [0.15, 0.85],
+            #[cfg(feature = "intelligence")]
+            co_activations_total: 3,
+            #[cfg(feature = "intelligence")]
+            hebbian_ltp_total: 10,
+            #[cfg(feature = "intelligence")]
+            hebbian_ltd_total: 5,
+            #[cfg(feature = "intelligence")]
+            hebbian_last_tick: 99,
+            emergence_events: 0,
+            emergence_active_monitors: 0,
+            #[cfg(feature = "bridges")]
+            synthex_stale: false,
+            #[cfg(feature = "bridges")]
+            rm_stale: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("ralph_gen"));
@@ -2217,7 +2836,8 @@ mod tests {
         assert!(c.povm_read);
         assert!(!c.povm_write);
         assert!(c.hydration);
-        assert!(c.updated_ms > 0);
+        // BUG-GEN11 fix: fully_open() uses sentinel 0, not epoch_ms()
+        assert_eq!(c.updated_ms, CONSENT_DEFAULT_TIMESTAMP);
     }
 
     #[test]
@@ -2403,6 +3023,61 @@ mod tests {
         state.update_consent("restricted", &req);
         assert!(!state.consent_allows("restricted", "hydration"));
         assert!(state.consent_allows("other-sphere", "hydration"));
+    }
+
+    // ── BUG-GEN11: Consent default timestamp sentinel ──
+
+    #[test]
+    fn consent_default_timestamp_is_zero() {
+        assert_eq!(CONSENT_DEFAULT_TIMESTAMP, 0);
+    }
+
+    #[test]
+    fn fully_open_uses_sentinel_not_epoch() {
+        let c1 = OracConsent::fully_open();
+        let c2 = OracConsent::fully_open();
+        // Both should use the same sentinel value (0), not different epoch timestamps
+        assert_eq!(c1.updated_ms, c2.updated_ms);
+        assert_eq!(c1.updated_ms, 0);
+    }
+
+    #[test]
+    fn get_consent_unknown_sphere_uses_sentinel() {
+        let state = OracState::new(PvConfig::default());
+        let c = state.get_consent("never-seen-before");
+        assert_eq!(c.updated_ms, CONSENT_DEFAULT_TIMESTAMP);
+    }
+
+    #[test]
+    fn update_consent_sets_real_timestamp() {
+        let state = OracState::new(PvConfig::default());
+        let req = ConsentUpdateRequest {
+            synthex_write: Some(false),
+            povm_read: None,
+            povm_write: None,
+            hydration: None,
+        };
+        state.update_consent("sphere-ts", &req);
+        let c = state.get_consent("sphere-ts");
+        // After explicit update, updated_ms should be a real epoch timestamp
+        assert!(c.updated_ms > 1_577_836_800_000, "should be real epoch after update");
+    }
+
+    #[test]
+    fn no_update_keeps_sentinel() {
+        let state = OracState::new(PvConfig::default());
+        // Empty update request → no fields changed → timestamp stays sentinel
+        let req = ConsentUpdateRequest {
+            synthex_write: None,
+            povm_read: None,
+            povm_write: None,
+            hydration: None,
+        };
+        state.update_consent("sphere-noop", &req);
+        // The sphere was inserted with fully_open() but no fields updated,
+        // so updated_ms should remain at sentinel.
+        let c = state.get_consent("sphere-noop");
+        assert_eq!(c.updated_ms, CONSENT_DEFAULT_TIMESTAMP);
     }
 
     // ── epoch_ms ──

@@ -962,4 +962,39 @@ mod tests {
         }
         assert!(a.task_record_count() <= MAX_TASK_RECORDS);
     }
+
+    // ── PostToolUse wiring (token estimate from chars/4) ──
+
+    #[test]
+    fn pane_usage_accumulates_across_calls() {
+        let a = TokenAccountant::new();
+        let pane = PaneId::new("pane-a");
+        a.record_pane_usage(&pane, 10, 20).unwrap();
+        a.record_pane_usage(&pane, 5, 15).unwrap();
+        let summary = a.summary();
+        assert_eq!(summary.fleet_total.input_tokens, 15);
+        assert_eq!(summary.fleet_total.output_tokens, 35);
+        assert_eq!(summary.pane_count, 1);
+    }
+
+    #[test]
+    fn summary_tracks_multiple_panes() {
+        let a = TokenAccountant::new();
+        a.record_pane_usage(&PaneId::new("p1"), 10, 10).unwrap();
+        a.record_pane_usage(&PaneId::new("p2"), 20, 20).unwrap();
+        let summary = a.summary();
+        assert_eq!(summary.pane_count, 2);
+        assert_eq!(summary.fleet_total.total_tokens, 60);
+    }
+
+    #[test]
+    fn token_estimate_from_char_length() {
+        // Simulates the chars/4 estimation used in PostToolUse handler
+        let input_chars = 400;
+        let output_chars = 800;
+        let input_tokens = (input_chars / 4).max(1) as u64;
+        let output_tokens = (output_chars / 4).max(1) as u64;
+        assert_eq!(input_tokens, 100);
+        assert_eq!(output_tokens, 200);
+    }
 }

@@ -45,7 +45,9 @@ const DEFAULT_MIN_CONFIDENCE: f64 = 0.6;
 const MAX_MONITORS: usize = 50;
 
 /// Default coherence lock threshold (r value).
-const DEFAULT_COHERENCE_LOCK_R: f64 = 0.998;
+/// Gen-059g: Lowered from 0.998 to 0.92 — field r peaks at 0.92 naturally.
+/// 0.998 was unreachable with Kuramoto oscillator noise.
+const DEFAULT_COHERENCE_LOCK_R: f64 = 0.92;
 
 /// Default coherence lock duration (ticks).
 const DEFAULT_COHERENCE_LOCK_TICKS: u64 = 10;
@@ -55,6 +57,28 @@ const DEFAULT_RUNAWAY_WINDOW: u64 = 20;
 
 /// Hebbian weight saturation threshold (fraction of weights at floor/ceiling).
 const DEFAULT_SATURATION_RATIO: f64 = 0.8;
+
+/// Minimum r for beneficial sync detection.
+/// Gen-059g: Lowered from 0.85 to 0.78 — field r regularly peaks 0.78-0.86,
+/// so 0.78 allows detection of natural Kuramoto sync events.
+const BENEFICIAL_SYNC_R: f64 = 0.78;
+
+/// Minimum improvement in r for beneficial sync detection.
+/// Gen-059g: Lowered from 0.02 to 0.01.
+/// Gen-060a: Lowered from 0.01 to 0.005 — 5s tick interval produces
+/// ~0.003 per-tick r change, so 0.01 is too coarse.
+const BENEFICIAL_SYNC_IMPROVEMENT: f64 = 0.005;
+
+/// Minimum sustained r for field stability detection.
+/// Gen-059g: Lowered from 0.70 to 0.65 — field oscillates and dips below 0.70
+/// frequently, preventing stability events from ever firing.
+const FIELD_STABILITY_R: f64 = 0.65;
+
+/// Number of consecutive ticks r must exceed threshold for stability.
+/// Gen-060a: Lowered from 20 to 12 — at 5s ticks, 20 requires 100s of
+/// unbroken stability. 12 (60s) is more realistic for oscillating fields
+/// and avoids the boot-time r=0.0 poisoning the entire window.
+const FIELD_STABILITY_WINDOW: usize = 12;
 
 // ──────────────────────────────────────────────────────────────
 // Enums
@@ -632,6 +656,11 @@ impl EmergenceDetector {
 
     /// Detect beneficial spontaneous synchronization.
     ///
+    /// Triggers when current r exceeds `BENEFICIAL_SYNC_R` and improves by at
+    /// least `BENEFICIAL_SYNC_IMPROVEMENT` over the previous sample. This is
+    /// achievable through gradual Kuramoto evolution, unlike the original
+    /// threshold that required a single-tick jump from r<0.8 to r>0.95.
+    ///
     /// # Errors
     /// Returns [`PvError`] on invalid input.
     pub fn detect_beneficial_sync(
@@ -640,22 +669,74 @@ impl EmergenceDetector {
         previous_r: f64,
         tick: u64,
     ) -> PvResult<Option<u64>> {
-        if r > 0.95 && previous_r < 0.8 {
+        if r > BENEFICIAL_SYNC_R && r > previous_r + BENEFICIAL_SYNC_IMPROVEMENT {
             let improvement = r - previous_r;
-            // Scale confidence: a jump of 0.15+ is high confidence
-            let confidence = (improvement / 0.15).clamp(0.0, 1.0);
+            // Base 0.5 + scaled improvement ensures even small gradual gains
+            // produce confidence >= DEFAULT_MIN_CONFIDENCE (0.6).
+            let confidence = improvement.mul_add(5.0, 0.5).clamp(0.0, 1.0);
             self.record_emergence(&EmergenceParams {
                 emergence_type: EmergenceType::BeneficialSync,
                 confidence,
                 severity: 0.2,
                 affected_panes: Vec::new(),
-                description: format!("r jumped from {previous_r:.3} to {r:.3}"),
+                description: format!("r improved from {previous_r:.3} to {r:.3}"),
                 tick,
                 recommended_action: None,
             })
         } else {
             Ok(None)
         }
+    }
+
+    /// Detect sustained field stability — r above threshold for a sliding window.
+    ///
+    /// When the mean r over the last `window` samples exceeds
+    /// `FIELD_STABILITY_R`, fires a `BeneficialSync` emergence with high
+    /// confidence. This detects gradual convergence that single-tick
+    /// comparisons miss.
+    ///
+    /// # Errors
+    /// Returns [`PvError`] if recording fails.
+    pub fn detect_field_stability(
+        &self,
+        r_history: &[f64],
+        tick: u64,
+    ) -> PvResult<Option<u64>> {
+        if r_history.len() < FIELD_STABILITY_WINDOW {
+            return Ok(None);
+        }
+
+        let window = &r_history[r_history.len() - FIELD_STABILITY_WINDOW..];
+        let all_above = window.iter().all(|&r| r > FIELD_STABILITY_R);
+
+        if !all_above {
+            return Ok(None);
+        }
+
+        // Avoid duplicate: check if we fired within last 100 ticks
+        let recent = self.recent(10);
+        let recently_fired = recent.iter().any(|e| {
+            e.emergence_type == EmergenceType::BeneficialSync
+                && tick.saturating_sub(e.detected_at_tick) < 100
+                && e.description.contains("sustained")
+        });
+        if recently_fired {
+            return Ok(None);
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let mean_r = window.iter().sum::<f64>() / window.len() as f64;
+        self.record_emergence(&EmergenceParams {
+            emergence_type: EmergenceType::BeneficialSync,
+            confidence: mean_r.clamp(0.0, 1.0),
+            severity: 0.15,
+            affected_panes: Vec::new(),
+            description: format!(
+                "sustained r={mean_r:.3} over {FIELD_STABILITY_WINDOW} ticks"
+            ),
+            tick,
+            recommended_action: None,
+        })
     }
 
     /// Start a new emergence monitor for a specific behavior type.
@@ -773,7 +854,22 @@ impl EmergenceDetector {
     }
 
     /// Tick: decay TTLs and remove expired records.
+    ///
+    /// BUG-Gen15 fix: Also enforces absolute tick-based TTL. Records older
+    /// than `ttl_ticks` from `current_tick` are purged even if their
+    /// decrement-based TTL has not yet reached zero (e.g. if `tick_decay`
+    /// calls were skipped or irregular).
     pub fn tick_decay(&self) {
+        self.tick_decay_at(0);
+    }
+
+    /// Tick: decay TTLs and remove expired records with tick-based purging.
+    ///
+    /// Records where `current_tick - detected_at_tick > ttl_ticks` are
+    /// removed regardless of their remaining TTL counter. This prevents
+    /// stale entries from lingering when `tick_decay` is not called every tick.
+    pub fn tick_decay_at(&self, current_tick: u64) {
+        let ttl_limit = self.config.ttl_ticks;
         let mut hist = self.history.write();
         let before = hist.len();
 
@@ -782,8 +878,17 @@ impl EmergenceDetector {
             record.ttl = record.ttl.saturating_sub(1);
         }
 
-        // Remove expired
-        hist.retain(|r| r.ttl > 0);
+        // Remove expired: either TTL counter reached zero or absolute tick age exceeded
+        hist.retain(|r| {
+            if r.ttl == 0 {
+                return false;
+            }
+            // Absolute tick-based TTL enforcement (BUG-Gen15)
+            if current_tick > 0 && current_tick.saturating_sub(r.detected_at_tick) > ttl_limit {
+                return false;
+            }
+            true
+        });
 
         let expired = before - hist.len();
 
@@ -791,7 +896,10 @@ impl EmergenceDetector {
 
         let mut stats = self.stats.write();
         stats.decay_passes += 1;
-        stats.total_expired += expired as u64;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            stats.total_expired += expired as u64;
+        }
         stats.active_monitors = self.monitors.read().len();
     }
 
@@ -1088,11 +1196,103 @@ mod tests {
         assert_eq!(stats.total_expired, 1);
     }
 
+    /// BUG-Gen15: Verify `tick_decay_at` enforces absolute tick-based TTL.
+    #[test]
+    fn tick_decay_at_purges_stale_by_absolute_tick() {
+        let config = EmergenceDetectorConfig {
+            ttl_ticks: 10,
+            min_confidence: 0.0,
+            ..Default::default()
+        };
+        let det = EmergenceDetector::with_config(config);
+
+        // Record at tick 5 with TTL=10
+        det.record_emergence(&ep(
+            EmergenceType::ThermalSpike,
+            0.9,
+            0.5,
+            Vec::new(),
+            "stale record",
+            5,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(det.history_len(), 1);
+
+        // At tick 10, age=5 which is <= ttl_ticks(10), should survive
+        det.tick_decay_at(10);
+        // TTL was decremented from 10 to 9, and age(5) <= limit(10) → survives
+        assert_eq!(det.history_len(), 1);
+
+        // At tick 20, age=15 which is > ttl_ticks(10), should be purged
+        det.tick_decay_at(20);
+        assert_eq!(det.history_len(), 0);
+    }
+
+    /// BUG-Gen15: Verify `tick_decay_at` purges even with high remaining TTL.
+    #[test]
+    fn tick_decay_at_purges_despite_high_remaining_ttl() {
+        let config = EmergenceDetectorConfig {
+            ttl_ticks: 5,
+            min_confidence: 0.0,
+            ..Default::default()
+        };
+        let det = EmergenceDetector::with_config(config);
+
+        // Record at tick 1 with TTL=5
+        det.record_emergence(&ep(
+            EmergenceType::BeneficialSync,
+            0.9,
+            0.3,
+            Vec::new(),
+            "test",
+            1,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(det.history_len(), 1);
+
+        // Jump directly to tick 100 without intermediate decay calls.
+        // Age=99 >> ttl_ticks=5, so record should be purged even though
+        // its decrement TTL only went from 5 to 4.
+        det.tick_decay_at(100);
+        assert_eq!(det.history_len(), 0);
+    }
+
+    /// BUG-Gen15: Backward compatibility — `tick_decay()` without tick still works.
+    #[test]
+    fn tick_decay_without_tick_still_decrements() {
+        let config = EmergenceDetectorConfig {
+            ttl_ticks: 3,
+            min_confidence: 0.0,
+            ..Default::default()
+        };
+        let det = EmergenceDetector::with_config(config);
+
+        det.record_emergence(&ep(
+            EmergenceType::DispatchLoop,
+            0.8,
+            0.5,
+            Vec::new(),
+            "test",
+            1,
+            None,
+        ))
+        .unwrap();
+
+        det.tick_decay(); // TTL 3→2
+        assert_eq!(det.history_len(), 1);
+        det.tick_decay(); // TTL 2→1
+        assert_eq!(det.history_len(), 1);
+        det.tick_decay(); // TTL 1→0, removed
+        assert_eq!(det.history_len(), 0);
+    }
+
     #[test]
     fn detect_coherence_lock_triggered() {
         let det = make_detector();
-        // 10 ticks of r > 0.998
-        let r_history: Vec<f64> = vec![0.999; 10];
+        // 10 ticks of r > 0.92
+        let r_history: Vec<f64> = vec![0.95; 10];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_some());
     }
@@ -1100,7 +1300,7 @@ mod tests {
     #[test]
     fn detect_coherence_lock_not_triggered() {
         let det = make_detector();
-        let r_history: Vec<f64> = vec![0.95; 10]; // Below 0.998
+        let r_history: Vec<f64> = vec![0.88; 10]; // Below 0.92
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_none());
     }
@@ -1215,24 +1415,103 @@ mod tests {
     }
 
     #[test]
-    fn detect_beneficial_sync_triggered() {
+    fn detect_beneficial_sync_triggered_large_jump() {
         let det = make_detector();
         let result = det.detect_beneficial_sync(0.97, 0.6, 50).unwrap();
         assert!(result.is_some());
     }
 
     #[test]
-    fn detect_beneficial_sync_not_triggered() {
+    fn detect_beneficial_sync_triggered_gradual() {
         let det = make_detector();
-        let result = det.detect_beneficial_sync(0.85, 0.6, 50).unwrap();
+        // r=0.88, prev=0.85 → improvement of 0.03 > BENEFICIAL_SYNC_IMPROVEMENT
+        let result = det.detect_beneficial_sync(0.88, 0.85, 50).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn detect_beneficial_sync_not_triggered_below_threshold() {
+        let det = make_detector();
+        // r=0.75 is below BENEFICIAL_SYNC_R (0.78)
+        let result = det.detect_beneficial_sync(0.75, 0.6, 50).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn detect_beneficial_sync_not_triggered_insufficient_improvement() {
+        let det = make_detector();
+        // r=0.86, prev=0.857 → improvement of 0.003 < BENEFICIAL_SYNC_IMPROVEMENT (0.005)
+        let result = det.detect_beneficial_sync(0.86, 0.857, 50).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn detect_beneficial_sync_already_high() {
         let det = make_detector();
-        let result = det.detect_beneficial_sync(0.97, 0.95, 50).unwrap();
+        // Both very high but improvement 0.003 < threshold (0.005)
+        let result = det.detect_beneficial_sync(0.97, 0.967, 50).unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Field stability detection ──
+
+    #[test]
+    fn detect_field_stability_triggered() {
+        let det = make_detector();
+        // 25 ticks all above 0.80 (window=20)
+        let history: Vec<f64> = vec![0.85; 25];
+        let result = det.detect_field_stability(&history, 100).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn detect_field_stability_insufficient_data() {
+        let det = make_detector();
+        let history: Vec<f64> = vec![0.85; 8]; // < 12 (FIELD_STABILITY_WINDOW)
+        let result = det.detect_field_stability(&history, 100).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn detect_field_stability_dip_below_threshold() {
+        let det = make_detector();
+        // All above threshold except 1 dip within the last 12
+        let mut history: Vec<f64> = vec![0.85; 25];
+        history[22] = 0.60; // dip below FIELD_STABILITY_R (0.65) within last 12
+        let result = det.detect_field_stability(&history, 100).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn detect_field_stability_no_duplicate_within_cooldown() {
+        let det = make_detector();
+        let history: Vec<f64> = vec![0.85; 25];
+        // First detection fires
+        let r1 = det.detect_field_stability(&history, 100).unwrap();
+        assert!(r1.is_some());
+        // Second within 100 ticks is suppressed
+        let r2 = det.detect_field_stability(&history, 150).unwrap();
+        assert!(r2.is_none());
+    }
+
+    #[test]
+    fn detect_field_stability_fires_after_cooldown() {
+        let det = make_detector();
+        let history: Vec<f64> = vec![0.85; 25];
+        let _ = det.detect_field_stability(&history, 100).unwrap();
+        // After 100 tick cooldown
+        let result = det.detect_field_stability(&history, 250).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn detect_field_stability_confidence_is_mean_r() {
+        let det = make_detector();
+        let history: Vec<f64> = vec![0.90; 25];
+        let id = det.detect_field_stability(&history, 100).unwrap().unwrap();
+        let records = det.recent(1);
+        let record = records.iter().find(|e| e.id == id).unwrap();
+        assert!((record.confidence - 0.90).abs() < 0.01);
     }
 
     #[test]
