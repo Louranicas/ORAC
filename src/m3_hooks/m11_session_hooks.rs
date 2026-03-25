@@ -161,9 +161,14 @@ pub async fn handle_stop(
         }
     }
 
-    let status_url = format!("{}/sphere/{}/status", state.pv2_url, pane_id_str);
-    let status_body = serde_json::json!({"status": "complete"}).to_string();
-    fire_and_forget_post(status_url, status_body);
+    // BUG-060f: Skip PV2 sphere operations when session is unknown.
+    // Without this, Stop hooks for sessions that started before ORAC (re)started
+    // use "unknown-session" as pane_id, causing 404s on PV2 and consent denials.
+    if tracker.is_some() {
+        let status_url = format!("{}/sphere/{}/status", state.pv2_url, pane_id_str);
+        let status_body = serde_json::json!({"status": "complete"}).to_string();
+        fire_and_forget_post(status_url, status_body);
+    }
 
     let r_value = state.field_state.read().field.order.r;
 
@@ -298,9 +303,11 @@ pub async fn handle_stop(
         network.deregister(&pid);
     }
 
-    // 7. Deregister sphere on PV2
-    let dereg_url = format!("{}/sphere/{}/deregister", state.pv2_url, pane_id_str);
-    fire_and_forget_post(dereg_url, String::new());
+    // 7. Deregister sphere on PV2 (skip for unknown sessions — BUG-060f)
+    if tracker.is_some() {
+        let dereg_url = format!("{}/sphere/{}/deregister", state.pv2_url, pane_id_str);
+        fire_and_forget_post(dereg_url, String::new());
+    }
 
     Json(HookResponse::empty())
 }

@@ -15,7 +15,9 @@ use crate::m1_core::m02_error_handling::{PvError, PvResult};
 const DEFAULT_TCP_TIMEOUT_MS: u64 = 2000;
 
 /// Default maximum response body size (bytes).
-const DEFAULT_MAX_RESPONSE_SIZE: usize = 8192;
+/// BUG-060i: Increased 8KB → 32KB. VMS query responses are ~11KB, causing
+/// EOF truncation at the old 8KB limit.
+const DEFAULT_MAX_RESPONSE_SIZE: usize = 32_768;
 
 /// Send a raw HTTP GET request over TCP and return the response body.
 ///

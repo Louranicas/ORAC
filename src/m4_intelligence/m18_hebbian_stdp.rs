@@ -16,6 +16,12 @@ use crate::m1_core::{
 use crate::m1_core::m01_core_types::PaneSphere;
 use super::m15_coupling_network::CouplingNetwork;
 
+/// Soft ceiling for coupling weights (BUG-060e+h).
+///
+/// Prevents LTP from pushing weights to 1.0 where they saturate
+/// and produce zero delta, permanently stalling learning.
+const HEBBIAN_SOFT_CEILING: f64 = 0.85;
+
 // ──────────────────────────────────────────────────────────────
 // STDP update
 // ──────────────────────────────────────────────────────────────
@@ -107,17 +113,11 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
                 return None;
             };
 
-            // BUG-060e: Homeostatic decay prevents weight saturation at ceiling/floor.
-            // Without this, LTP connections hit 1.0 and LTD connections hit 0.15,
-            // producing zero delta and permanently stalling STDP learning.
-            // Pull weight toward midpoint (0.5) by 0.5% per cycle — enough to
-            // prevent saturation while preserving learned weight differentiation.
-            let homeostatic_target = 0.5;
-            let homeostatic_rate = 0.005;
-            let homeostatic_pull = (homeostatic_target - conn.weight) * homeostatic_rate;
-
-            let new_weight = (conn.weight + weight_delta + homeostatic_pull)
-                .clamp(m04_constants::HEBBIAN_WEIGHT_FLOOR, 1.0);
+            // BUG-060e+h: Soft ceiling prevents weight saturation while preserving
+            // STDP LTP/LTD semantics. Keeps weights in [FLOOR, 0.85] with
+            // meaningful LTP/LTD deltas at all weights.
+            let new_weight = (conn.weight + weight_delta)
+                .clamp(m04_constants::HEBBIAN_WEIGHT_FLOOR, HEBBIAN_SOFT_CEILING);
 
             Some((conn.from.clone(), conn.to.clone(), new_weight))
         })

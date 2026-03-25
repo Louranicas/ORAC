@@ -966,12 +966,15 @@ fn query_vms_for_ralph_context(state: &OracState, tick: u64) {
     let fitness = state.ralph.state().current_fitness;
 
     // Gap fix: tool name is query_relevant (not query_semantic — doesn't exist on running VMS)
+    // BUG-060g: VMS requires 'threshold' parameter (minimum relevance score).
+    // Without it, returns success:false with "missing 'threshold' parameter".
     let query_payload = serde_json::json!({
         "tool": "query_relevant",
         "params": {
             "query": format!("field r={r:.3} fitness={fitness:.3}"),
             "k": 5,
-            "region": "field_state"
+            "region": "field_state",
+            "threshold": 0.3
         }
     });
 
