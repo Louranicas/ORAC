@@ -2296,6 +2296,11 @@ async fn dispatch_handler(
 /// Each hook endpoint delegates to its handler module (m11-m14).
 /// Handlers receive `Arc<OracState>` via Axum's `State` extractor.
 pub fn build_router(state: Arc<OracState>) -> Router {
+    // Extract body limit from config BEFORE `.with_state()` consumes the Arc.
+    // The layer must be applied to Router (not Router<Arc<OracState>>),
+    // so we read the value first, then hand ownership to Axum.
+    let body_limit = state.config.server.body_limit_bytes;
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/field", get(field_handler))
@@ -2342,9 +2347,9 @@ pub fn build_router(state: Arc<OracState>) -> Router {
         )
         .with_state(state)
         // SEC-004 fix: Apply HTTP body size limit to prevent OOM from oversized POSTs.
-        // Uses the body_limit_bytes from config (default 65,536 bytes = 64KB).
+        // Reads body_limit_bytes from config (default 65,536 bytes = 64KB).
         // Without this, any POST endpoint can be OOM'd with a multi-GB payload.
-        .layer(axum::extract::DefaultBodyLimit::max(65_536))
+        .layer(axum::extract::DefaultBodyLimit::max(body_limit))
 }
 
 // ──────────────────────────────────────────────────────────────
