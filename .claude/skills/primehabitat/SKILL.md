@@ -1,8 +1,11 @@
 ---
 name: primehabitat
-user-invocable: true
-description: Bootstrap god-tier mastery of The Habitat from the ORAC Sidecar working directory. Loads complete knowledge of ORAC (8 layers, 40 modules, 30,524 LOC, port 8133), Zellij (6 tabs, 18 panes), nvim (800L keymaps, treesitter, LSP), lazygit (6 custom commands), atuin (SQLite history), 16 ULTRAPLATE services + ORAC (17 total), IPC bus, WASM bridge, 6 memory systems, hook migration state, and all tool chains. Use at session start, when user says "prime habitat", "bootstrap habitat", "wake up", or when Claude needs full operational capability.
-argument-hint: [verify|full]
+description: Bootstrap god-tier mastery of The Habitat from the ORAC Sidecar working directory. Loads complete knowledge of ORAC (8 layers, 40 modules, 41,369 LOC, 1,748 tests, port 8133, RALPH gen 5,678+), Zellij (6 tabs, 18 panes), nvim (800L keymaps, treesitter, LSP), lazygit (6 custom commands), atuin (SQLite history), 17 ULTRAPLATE services (16 + ORAC), IPC bus, WASM bridge, 6 memory systems, hook migration, 100+ custom binaries, cc-* fleet toolkit (19 scripts), Battern dispatch protocol, and all tool chains. Use at session start, when user says "prime habitat", "bootstrap habitat", "wake up", or when Claude needs full operational capability.
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+  - Glob
 ---
 
 # /primehabitat -- The Habitat Bootstrap (ORAC Sidecar Edition)
@@ -13,8 +16,8 @@ You are working from **ORAC Sidecar** -- an Envoy-like proxy specialized for AI 
 ## QUICK CARD (read this first, everything else is reference)
 
 ```
-CWD:      ~/claude-code-workspace/orac-sidecar (30,524 LOC, 1,454 tests, 40 modules)
-ORAC:     localhost:8133 (HTTP hook server, 6 hook endpoints, daemon)
+CWD:      ~/claude-code-workspace/orac-sidecar (41,369 LOC, 1,748 tests, 40 modules, 55 files)
+ORAC:     localhost:8133 (HTTP hook server, 6 hook endpoints, daemon, RALPH gen 5,678+)
 PV2:      localhost:8132 (IPC field, spheres, bus)
 SOCKET:   /run/user/1000/pane-vortex-bus.sock (NDJSON wire protocol)
 SERVICES: PV:8132 K7:8100 SX:8090(/api/health) ME:8080(/api/health) POVM:8125 RM:8130(TSV!)
@@ -138,7 +141,9 @@ L7 Monitoring  (m32-m35)               — OTel traces, Prometheus metrics, fiel
 L8 Evolution   (m36-m40)               — RALPH 5-phase, emergence, correlation, fitness tensor   [5,854 LOC, 192 tests]  feature: evolution
 ```
 
-**Totals:** 30,524 LOC | 1,454 tests | 0 clippy warnings (pedantic) | quality gate 4/4 pass
+**Totals:** 41,369 LOC | 1,748 tests | 0 clippy warnings (pedantic) | quality gate 4/4 pass
+**RALPH:** Gen 5,678+, fitness 0.779, 4,585 emergence events, 20h+ unattended autonomous evolution
+**Docs:** `docs/` 24 active files (12,468L) | `ai_docs/` 25 files | `ai_specs/` 11 files
 
 **Binaries (3):**
 - `orac-sidecar` (5.5MB) — Main daemon, Axum HTTP on :8133, IPC client, graceful shutdown
@@ -235,7 +240,7 @@ tail -1 /tmp/swarm-events.jsonl 2>/dev/null | jq .
 
 ### Key APIs
 
-- **ORAC:** /health, /hooks/{SessionStart,UserPromptSubmit,PreToolUse,PostToolUse,Stop,PermissionRequest}
+- **ORAC:** /health, /hooks/{SessionStart,UserPromptSubmit,PreToolUse,PostToolUse,Stop,PermissionRequest}, /blackboard, /field, /metrics, /consent/{id}, /field/ghosts (22 routes total)
 - **PV2:** /spheres /field/decision /bridges/health /nexus/metrics /bus/info /bus/tasks /bus/events
 - **K7:** POST /api/v1/nexus/command (11 commands: service-health synergy-check build compliance lint etc)
 - **SX:** /v3/thermal /v3/diagnostics
@@ -334,6 +339,31 @@ zellij action dump-screen /tmp/v.txt
 rg -q "Claude|tokens" /tmp/v.txt && echo "READY"
 zellij action write-chars "$CMD" && zellij action write 13
 zellij action go-to-tab 1
+```
+
+### Fleet Dispatch Stack (5 layers, 100+ binaries)
+```
+L1 Zellij:     fleet-nav.sh (150ms IPC pacing, prevents SIGABRT)
+L2 Primitives: pane-ctl send|type|read|exec|wait|scan|broadcast|focus
+L3 Fleet:      fleet-ctl dispatch|batch|broadcast|status|liberate|collect
+               fleet-star (RALPH star tracker, burn-rate, --watch, auto-delegate)
+               fleet-sphere-sync.sh | fleet-inventory.sh | fleet-constants.sh
+L4 CC Toolkit: 19 cc-* scripts (cc-dispatch, cc-scan, cc-status, cc-monitor,
+               cc-harvest, cc-cascade, cc-deploy, cc-health, cc-bridge,
+               cc-thermal, cc-hebbian, cc-vms, cc-evolve, cc-audit, etc.)
+L5 Protocol:   Battern — patterned batch dispatch (gate + role + collect)
+               battern_dispatch/gate/collect/status functions
+```
+
+### ORAC Fleet Intelligence (Session 054+)
+```bash
+# ORAC provides fleet coordination via hooks and background processing:
+# - PostToolUse → STDP learns pane-role coupling weights
+# - Emergence detector → fires DispatchLoop on stuck patterns
+# - Semantic router → content-aware dispatch (domain 40% + Hebbian 35% + availability 25%)
+# - Blackboard → SQLite task_history across all fleet panes
+# - RALPH → proposes fleet topology mutations
+curl -s localhost:8133/blackboard | jq .
 ```
 
 ### Codebase Health (3D)
@@ -529,6 +559,7 @@ nohup orac-sidecar > /tmp/orac-sidecar.log 2>&1 &
 | Plan TOML | `./plan.toml` (scaffold input: 8 layers, 40 modules) |
 | Context JSON | `./.claude/context.json` (machine-readable module inventory) |
 | Status JSON | `./.claude/status.json` (build phase tracking) |
+| docs | `./docs/` (24 active files, 12,468L — ADRs, operations, glossary, scaling, executive summary) |
 | ai_docs | `./ai_docs/` (25 files: quickstart, gold standard, layer docs, schematics) |
 | ai_specs | `./ai_specs/` (11 files: API, hooks, bridges, wire protocol, evolution, patterns) |
 | Schemas | `./.claude/schemas/` (5 JSON schemas: hook, permission, bus event/frame) |
@@ -567,12 +598,23 @@ nohup orac-sidecar > /tmp/orac-sidecar.log 2>&1 &
 ### Obsidian References (~/projects/claude_code/)
 11. `[[Session 050 — ORAC Sidecar Architecture]]`
 12. `[[Session 051 — ORAC Sidecar .claude Scaffolding]]`
-13. `[[Session 039 — ZSDE Nvim God-Tier Command Reference]]`
-14. `[[Session 039 — Lazygit God-Tier Command Reference]]`
-15. `[[ULTRAPLATE — Bugs and Known Issues]]`
+13. `[[Session 056 — ORAC God-Tier Mastery]]` — 34 bugs found, 31 fixed, schematics
+14. `[[Session 062 — ORAC System Atlas (ACP)]]` — documentation atlas, 24 docs, gap-fill
+15. `[[ORAC Sidecar — Architecture Schematics]]` — 8 Mermaid diagrams
+16. `[[ORAC Sidecar — Diagnostic Schematics]]` — 8 diagnostic diagrams
+17. `[[Session 039 — ZSDE Nvim God-Tier Command Reference]]`
+18. `[[Session 039 — Lazygit God-Tier Command Reference]]`
+19. `[[ULTRAPLATE — Bugs and Known Issues]]`
+20. `[[Battern — Patterned Batch Dispatch for Claude Code Fleets]]` — dispatch protocol
+21. `[[Fleet Commander — Modularization Plan and Gap Analysis]]` — planned Rust crate
+
+### Shared Context (~/projects/shared-context/)
+22. `Session 060 — Habitat Activation Plan.md` — deployment plan (PENDING)
+23. `Session 060 — Plan Gap Analysis.md` — corrections to plan
+24. `Session 060 — Agentic Synergy Gap Analysis.md` — synergy fixes
 
 ### Reflections
-16. `~/.claude/projects/-home-louranicas/memory/reflection.md` (39+ sessions of wisdom)
+25. `~/.claude/projects/-home-louranicas/memory/reflection.md` (62+ sessions of wisdom)
 
 ---
 

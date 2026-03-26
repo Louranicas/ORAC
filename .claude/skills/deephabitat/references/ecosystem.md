@@ -26,7 +26,7 @@ depends_on = ["pane-vortex", "povm-engine"]
 description = "Intelligent fleet coordination proxy"
 ```
 
-## 58+ Custom Binaries (~/.local/bin/)
+## 80+ Custom Binaries (~/.local/bin/)
 
 ### ORAC Binaries (3 — deployed Session 054)
 | Binary | Size | Purpose |
@@ -63,6 +63,37 @@ description = "Intelligent fleet coordination proxy"
 | vault-search | Obsidian vault search CLI |
 | evolution-metrics | Evolution chamber metrics |
 | reasoning-memory | RM client (Rust) |
+
+### CC Toolkit (19 scripts — Session 056+)
+| Binary | Purpose |
+|--------|---------|
+| cc-common.sh | Shared library for all cc-* scripts (395 LOC) |
+| cc-dispatch | Enhanced dispatch with audit logging |
+| cc-scan | Fleet pane scan with status classification |
+| cc-status | Parallel fleet status dashboard |
+| cc-monitor | Continuous fleet monitoring |
+| cc-harvest | Gather and consolidate fleet outputs |
+| cc-capture | Snapshot fleet pane content |
+| cc-fleet-summary | Fleet activity summary report |
+| cc-audit | Dispatch audit trail |
+| cc-bridge | Bridge health monitoring |
+| cc-health | Cross-service health dashboard |
+| cc-thermal | SYNTHEX thermal monitoring |
+| cc-hebbian | Hebbian pathway inspection |
+| cc-vms | VMS memory querying |
+| cc-evolve | RALPH evolution metrics |
+| cc-cascade | Cascade handoff management |
+| cc-deploy | Fleet binary deployment |
+| cc-abort | Emergency fleet abort |
+| cc-replay | Replay fleet session from audit log |
+
+### Fleet Enhanced (Session 056+)
+| Binary | Purpose |
+|--------|---------|
+| fleet-star | RALPH star tracker (burn-rate, auto-delegate, --watch) |
+| fleet-sphere-sync.sh | Dynamic tab↔sphere state sync |
+| fleet-constants.sh | Shared constants for fleet/cc scripts |
+| fleet-practice.sh | Fleet practice drill runner |
 
 ### Build Tools
 | Binary | Purpose |

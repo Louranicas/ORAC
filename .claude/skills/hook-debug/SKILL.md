@@ -1,8 +1,9 @@
 ---
 name: hook-debug
-user-invocable: true
 description: Debug and test ORAC HTTP hook endpoints. Sends test payloads to all 6 hook events, inspects responses, checks latency, and verifies hook-to-PV2 wiring. Use when hook server is misbehaving, testing new hook logic, verifying permission policy, or checking thermal gate behavior.
-argument-hint: [event-name|all|latency]
+allowed-tools:
+  - Bash
+  - Read
 ---
 
 # /hook-debug — ORAC Hook Endpoint Debugger

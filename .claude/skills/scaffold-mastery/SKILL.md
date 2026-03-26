@@ -1,7 +1,11 @@
 ---
 name: scaffold-mastery
-user-invocable: true
 description: Generate plan-driven Rust microservice scaffolds from plan.toml, or default 8-layer/41-module scaffolds. Supports custom layers, modules, test kinds, feature gates, consent configuration, and per-module dependencies. Triggers on scaffold, generate scaffold, new project, create microservice, init codebase, build from scratch, scaffold practice, or when Claude needs to create a new Rust project structure from zero.
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
 ---
 
 # Scaffold Mastery

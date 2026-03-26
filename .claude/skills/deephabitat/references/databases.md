@@ -67,7 +67,7 @@ fleet_metrics (timestamp INT, order_param REAL, k_effective REAL, active_panes I
 | Orchestrator | code.db | Module registry |
 | Orchestrator | tensor_memory.db | SAN-K7 tensors |
 | Orchestrator | performance.db | Benchmarks |
-| POVM | povm_data.db | 115 memories, 2,437 pathways |
+| POVM | povm_data.db | 272 memories, 2,573 pathways |
 | RM | TSV flat file | 3,400+ entries |
 
 ## Cross-DB Query Patterns

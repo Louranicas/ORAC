@@ -1,8 +1,11 @@
 ---
 name: zellij-mastery
-user-invocable: true
-description: Gold standard Zellij 0.43.1 setup mastery for The Habitat. Covers config.kdl architecture (138+ keybinds, 11 modes), 6 KDL layouts (synth-orchestrator gold standard), 11 WASM plugins (6 floating, 2 background, 3 utility), fleet orchestration stack (fleet-ctl, pane-ctl, fleet-inventory), dispatch patterns, plugin pipe protocol, KDL syntax, layout design, troubleshooting. Triggers on zellij, layout, plugin, keybind, fleet dispatch, pane navigation, tab management, zellij config, zellij layout, zellij plugin, KDL syntax, swarm orchestrator, ghost plugin, harpoon, room, or when Claude needs to understand or modify the Zellij terminal environment.
-argument-hint: [config|layouts|plugins|dispatch|keybinds|troubleshoot|launch]
+description: Gold standard Zellij 0.43.1 setup mastery for The Habitat. Covers config.kdl architecture (138+ keybinds, 11 modes), 6 KDL layouts (synth-orchestrator gold standard), 11 WASM plugins (6 floating, 2 background, 3 utility), fleet orchestration stack (fleet-ctl, pane-ctl, fleet-inventory, 19 cc-* scripts, Battern protocol), dispatch patterns, plugin pipe protocol, KDL syntax, layout design, troubleshooting. Triggers on zellij, layout, plugin, keybind, fleet dispatch, pane navigation, tab management, zellij config, zellij layout, zellij plugin, KDL syntax, swarm orchestrator, ghost plugin, harpoon, room, or when Claude needs to understand or modify the Zellij terminal environment.
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+  - Glob
 ---
 
 # /zellij-mastery — Gold Standard Zellij Setup
@@ -32,11 +35,26 @@ PLUGINS (by keybind):
   Background: zellij-autolock (locks on nvim/lazygit), zellij-attention (tab indicators)
   Utility: zjstatus, zellij-send-keys (no keybind, programmatic use)
 
-DISPATCH STACK:
-  fleet-ctl dispatch|batch|broadcast|status|liberate|collect
-  pane-ctl send|type|read|exec|wait|scan|broadcast|focus
-  fleet-inventory.sh (L1 structural + L2 symptomatic scanning)
-  fleet-nav.sh (IPC safety: 150ms pacing, prevents 0.43.x SIGABRT)
+DISPATCH STACK (4 layers):
+  L1 Zellij:     fleet-nav.sh (IPC safety: 150ms pacing, prevents 0.43.x SIGABRT)
+  L2 Primitives: pane-ctl send|type|read|exec|wait|scan|broadcast|focus
+  L3 Fleet:      fleet-ctl dispatch|batch|broadcast|status|liberate|collect
+                 fleet-star (RALPH star tracker, burn-rate, auto-delegate, --watch)
+                 fleet-sphere-sync.sh (dynamic tab↔sphere state sync)
+                 fleet-inventory.sh (L1 structural + L2 symptomatic scanning)
+                 fleet-constants.sh (shared constants for all fleet scripts)
+  L4 CC Toolkit: 19 cc-* scripts (cc-dispatch, cc-scan, cc-status, cc-monitor,
+                 cc-harvest, cc-cascade, cc-deploy, cc-capture, cc-abort, cc-replay,
+                 cc-common.sh, cc-audit, cc-bridge, cc-evolve, cc-fleet-summary,
+                 cc-health, cc-hebbian, cc-thermal, cc-vms)
+  L5 Protocol:   Battern — patterned batch dispatch with gate checks + role-based dispatch
+                 battern_dispatch/gate/collect/status functions (see Battern note in Obsidian)
+
+ORAC INTEGRATION (Session 054+):
+  PostToolUse hooks → STDP learns pane-role coupling weights
+  Emergence detector → fires DispatchLoop if same role repeats without convergence
+  Blackboard → tracks task_history across fleet panes
+  RALPH → proposes battern topology mutations (pane count, round count)
 
 NEVER:
   focus-next-pane (wraps unpredictably — use directional move-focus)
@@ -367,15 +385,125 @@ fleet_scan                            # Full L1+L2 scan → /tmp/fleet-state.jso
 # Statuses: idle-shell, idle-claude, active-claude, busy, unknown
 ```
 
+### fleet-star — RALPH Star Tracker (Session 056+)
+```bash
+fleet-star                            # Star graph of all Claude instances
+fleet-star --watch 30                 # Auto-refresh every 30s
+fleet-star --delegate                 # Auto-delegate tasks to idle panes
+fleet-star --no-scan                  # Skip fleet inventory (use cache)
+# Probes: ORAC/PV2/POVM/ME/SYNTHEX/RM per iteration
+# Outputs: TSV to /tmp/fleet-star-generations.tsv
+# Features: burn-rate coloring, anomaly flags (r<0.5, fitness 3-gen decline)
+```
+
+### fleet-sphere-sync.sh — Dynamic Tab↔Sphere Sync
+```bash
+fleet-sphere-sync.sh                  # Sync fleet tab status → PV2 spheres
+fleet-sphere-sync.sh -v               # Verbose mode
+# Called by conductor loop to keep sphere idle/working states accurate
+# Dynamic tab discovery (not hardcoded)
+```
+
+### fleet-constants.sh — Shared Constants
+```bash
+source ~/.local/bin/fleet-constants.sh
+# Provides: FLEET_TABS, FLEET_POSITIONS, TAB_NAMES, ORAC_PORT, PV2_PORT
+# All values overridable via environment variables
+```
+
+### CC Toolkit — 19 Fleet Intelligence Scripts (Session 056+)
+```bash
+source ~/.local/bin/cc-common.sh      # Shared library for all cc-* scripts
+
+# Core operations
+cc-dispatch <tab:dir> "prompt"        # Enhanced dispatch with audit log
+cc-scan                               # Fleet pane scan with status classification
+cc-status                             # Parallel fleet status dashboard
+cc-monitor                            # Continuous fleet monitoring
+
+# Collection & analysis
+cc-harvest                            # Gather and consolidate fleet outputs
+cc-capture                            # Snapshot fleet pane content
+cc-fleet-summary                      # Fleet activity summary report
+cc-audit                              # Dispatch audit trail
+
+# Service integration
+cc-bridge                             # Bridge health monitoring
+cc-health                             # Cross-service health dashboard
+cc-thermal                            # SYNTHEX thermal monitoring
+cc-hebbian                            # Hebbian pathway inspection
+cc-vms                                # VMS memory querying
+cc-evolve                             # RALPH evolution metrics
+
+# Lifecycle
+cc-cascade                            # Cascade handoff management
+cc-deploy                             # Fleet binary deployment
+cc-abort                              # Emergency fleet abort
+cc-replay                             # Replay fleet session from audit log
+```
+
+### Battern — Patterned Batch Dispatch Protocol (Session 061)
+
+Battern is a **dispatch protocol** (not a CLI tool) for structured multi-pane work.
+
+```bash
+# Source the library
+source ~/.local/bin/battern-lib.sh    # If installed; otherwise follow protocol manually
+
+# Protocol steps:
+# 1. Design — choose topology, roles, output paths, gate criteria
+# 2. Dispatch — each pane gets unique role + output path
+battern_dispatch 4 left "Role: Investigator — explore X, write to tasks/run1-investigator.md"
+battern_dispatch 5 tr   "Role: Critic — challenge findings in tasks/run1-investigator.md"
+
+# 3. Gate — poll for completion (use /loop 5m or manual check)
+battern_gate "run1" 3                 # Wait for 3+ sources to deliver
+
+# 4. Collect — gather all sources into single doc
+battern_collect "run1" /tmp/battern-collection.md
+
+# 5. Synthesize — orchestrator reads collection, produces synthesis
+# 6. Compose (optional) — Round N output → Round N+1 input
+```
+
+**5 Battern types:** Investigation (explore), Adversarial (attack findings), Verification (check assumptions), Monitoring (star tracker), Implementation (parallel deploy)
+
+**Obsidian:** `[[Battern — Patterned Batch Dispatch for Claude Code Fleets]]`
+
+---
+
+## ORAC Fleet Integration (Session 054+)
+
+ORAC Sidecar (:8133) provides fleet coordination intelligence:
+
+| ORAC Capability | Fleet Impact |
+|----------------|-------------|
+| PostToolUse hooks | STDP learns which pane-role combinations produce best results |
+| Emergence detector | Fires `DispatchLoop` if same role repeats without convergence |
+| Blackboard | Tracks `task_history` across all fleet panes (SQLite) |
+| RALPH evolution | Proposes fleet topology mutations (pane count, round count, K coupling) |
+| Circuit breakers | Per-pane health gating (Closed/Open/HalfOpen FSM) |
+| Semantic router | Content-aware dispatch: domain affinity (40%) + Hebbian (35%) + availability (25%) |
+
+```bash
+# Check ORAC fleet state
+curl -s localhost:8133/blackboard | jq .
+curl -s localhost:8133/health | jq '{status,sessions,uptime_ticks}'
+```
+
 ---
 
 ## Obsidian Vault References
 
+- `[[Zellij Gold Standard — Session 050 Mastery Skill]]` — this skill's origin, coverage map, relationship to other skills
 - `[[Zellij Navigation God-Tier — Session 035]]` — directional targeting, benchmarks, dispatch
 - `[[Zellij — Complete Overview]]` — plugin ecosystem, official docs links
 - `[[Zellij Master Skill — Bootstrap Reference]]` — 8 skills, all benchmarked
 - `[[Zellij Pane Navigation Mastery — Session 027b]]` — original navigation work
 - `[[Zellij Session Auto-Cleanup 2026-03-07]]` — session lifecycle management
+- `[[Battern — Patterned Batch Dispatch for Claude Code Fleets]]` — dispatch protocol (Session 061)
+- `[[Session 056 — ORAC God-Tier Mastery]]` — CC toolkit creation, fleet-star, 9-instance fleet ops
+- `[[Fleet Commander — Modularization Plan and Gap Analysis]]` — planned 10-module Rust crate
 - `~/projects/shared-context/Zellij Plugins — Room and Harpoon.md` — deep plugin testing
 - `~/projects/shared-context/Zellij 0.43.1 Patched Binary.md` — patch details + rollback
 

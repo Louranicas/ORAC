@@ -503,8 +503,9 @@ fn feed_emergence_observations(
 
     // 3. Hebbian saturation detection (every 12 ticks to reduce overhead)
     if tick % 12 == 0 && !weights.is_empty() {
-        // Gen-059g: Use actual STDP weight bounds (0.15 floor, 1.0 ceiling)
-        match detector.detect_hebbian_saturation(&weights, 0.15, 1.0, tick) {
+        // Gen-063a: Use STDP soft ceiling (0.85) not theoretical max (1.0)
+        // so saturation detector fires when weights approach the actual learning bound.
+        match detector.detect_hebbian_saturation(&weights, 0.15, 0.85, tick) {
             Ok(Some(id)) => tracing::info!(id, "Emergence: HebbianSaturation detected"),
             Err(e) => tracing::debug!("Emergence hebbian_saturation check error: {e}"),
             _ => {}
@@ -965,56 +966,63 @@ fn query_vms_for_ralph_context(state: &OracState, tick: u64) {
     let r = state.field_state.read().field.order.r;
     let fitness = state.ralph.state().current_fitness;
 
-    // Gap fix: tool name is query_relevant (not query_semantic — doesn't exist on running VMS)
-    // BUG-060g: VMS requires 'threshold' parameter (minimum relevance score).
-    // Without it, returns success:false with "missing 'threshold' parameter".
+    // Gen-063f: Use REST /v1/query_semantic instead of MCP /mcp/tools/call.
+    // ACP-VMS finding: MCP query_semantic is "unknown tool" on running binary (30/47 tools),
+    // but REST /v1/query_semantic WORKS. Returns {results: [{address, content(STRING),
+    // geometric_relevance, tensor_similarity}], query_tensor, geometric_count} with k-truncation.
+    // Response ~660 bytes for k=2 (vs 527KB+ from query_relevant).
     let query_payload = serde_json::json!({
-        "tool": "query_relevant",
-        "params": {
-            "query": format!("field r={r:.3} fitness={fitness:.3}"),
-            "k": 5,
-            "region": "field_state",
-            "threshold": 0.3
-        }
+        "query": format!("field r={r:.3} fitness={fitness:.3}"),
+        "k": 3,
+        "threshold": 0.5
     });
 
-    // T3: Use response-aware POST to read VMS query results
     match raw_http_post_with_response(
         "127.0.0.1:8120",
-        "/mcp/tools/call",
+        "/v1/query_semantic",
         query_payload.to_string().as_bytes(),
         "vms",
     ) {
         Ok(body) => {
             state.breaker_success("vms");
 
-            // T3: Parse MCP tool result — check success field to catch 200-with-error-body
+            // REST /v1/query_semantic returns direct JSON (no MCP envelope):
+            // {results: [{address, content: STRING, geometric_relevance, tensor_similarity}]}
             match serde_json::from_str::<serde_json::Value>(&body) {
                 Ok(json) => {
-                    let success = json.get("success").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                    if success {
-                        // Feed VMS memories into RALPH correlation engine as observations
-                        if let Some(result) = json.get("result") {
-                            let memories = result.get("memories")
-                                .or_else(|| result.get("results"))
-                                .and_then(serde_json::Value::as_array);
-                            let mem_count = memories.map_or(0, Vec::len);
-                            if mem_count > 0 {
-                                tracing::info!(
-                                    tick, mem_count,
-                                    "VMS→RALPH: fed {mem_count} memories into Recognize phase"
-                                );
+                    let results = json.get("results")
+                        .and_then(serde_json::Value::as_array);
+                    let mem_count = results.map_or(0, Vec::len);
+                    if mem_count > 0 {
+                        // Gen-063f: Feed VMS memories into RALPH correlation engine.
+                        let corr = state.ralph.correlation();
+                        let mut ingested = 0u32;
+                        if let Some(mems) = results {
+                            for mem in mems {
+                                // REST query_semantic returns content as a STRING
+                                let content = mem.get("content")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("");
+                                if !content.is_empty() {
+                                    let relevance = mem.get("geometric_relevance")
+                                        .or_else(|| mem.get("tensor_similarity"))
+                                        .and_then(serde_json::Value::as_f64)
+                                        .unwrap_or(0.5);
+                                    corr.ingest(
+                                        "vms_memory",
+                                        "field_state",
+                                        relevance,
+                                        tick,
+                                        Some(content.get(..64).unwrap_or(content)),
+                                    );
+                                    ingested += 1;
+                                }
                             }
                         }
-                    } else {
-                        // 200 OK but success:false — semantic failure
-                        let err_msg = json.get("result")
-                            .and_then(|r| r.get("error"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("unknown");
-                        if tick % 60 == 0 {
-                            tracing::warn!(tick, error = err_msg, "VMS query returned success:false");
-                        }
+                        tracing::info!(
+                            tick, mem_count, ingested,
+                            "VMS→RALPH: fed memories into correlation engine"
+                        );
                     }
                 }
                 Err(e) => {

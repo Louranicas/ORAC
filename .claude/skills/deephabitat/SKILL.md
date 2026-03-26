@@ -1,7 +1,11 @@
 ---
 name: deephabitat
-user-invocable: true
-description: Deep substrate mastery for The Habitat from the ORAC Sidecar working directory. Covers ORAC internals (V2 wire protocol state machine, 5 blackboard tables, 6 hook handlers, 4 bridge clients, RALPH 5-phase evolution, 12D fitness tensor), cross-database architecture (166 DBs, 6 paradigms), ORAC config files (default/dev/prod/hooks/bridges TOML), Zellij plugins, nvim autocmds, devenv batches, 55+ custom binaries, vault navigation, service topology, and ORAC-specific anti-patterns. Triggers on deep habitat, deep exploration, substrate, wire protocol, cross-db, database architecture, devenv batches, custom binaries, ORAC internals, bridge protocol, evolution chamber, blackboard schema, hook internals, or when Claude needs substrate-level knowledge beyond what primehabitat provides.
+description: Deep substrate mastery for The Habitat from the ORAC Sidecar working directory. Covers ORAC internals (V2 wire protocol state machine, 10 blackboard tables, 6 hook handlers, 4 bridge clients, RALPH 5-phase evolution gen 5,678+, 12D fitness tensor), cross-database architecture (166 DBs, 6 paradigms), ORAC config files (default/dev/prod/hooks/bridges TOML), Zellij plugins, nvim autocmds, devenv batches, 100+ custom binaries (incl 19 cc-* fleet intelligence scripts), Battern dispatch protocol, vault navigation, service topology, and ORAC-specific anti-patterns. Triggers on deep habitat, deep exploration, substrate, wire protocol, cross-db, database architecture, devenv batches, custom binaries, ORAC internals, bridge protocol, evolution chamber, blackboard schema, hook internals, cc toolkit, battern, fleet intelligence, or when Claude needs substrate-level knowledge beyond what primehabitat provides.
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+  - Glob
 ---
 
 # /deephabitat -- Deep Habitat Mastery (ORAC Sidecar Edition)
@@ -24,15 +28,18 @@ habitat-probe full                  # Everything
 ## Quick Card
 
 ```
-ORAC:     localhost:8133 | 8 layers, 40 modules, 30,524 LOC, 1,454 tests
+ORAC:     localhost:8133 | 8 layers, 40 modules, 41,369 LOC, 1,748 tests
+RALPH:    Gen 5,678+, fitness 0.779, 4,585 emergence events, 20h+ unattended
 PIPE:     /run/user/1000/pane-vortex-bus.sock | NDJSON V2 | 10 ClientFrames, 6 ServerFrames
 WASM:     FIFO /tmp/swarm-commands.pipe → ring /tmp/swarm-events.jsonl (1K cap)
 CONFIG:   config/{default,dev,prod,hooks,bridges}.toml (figment overlay)
 CROSS-DB: 166 DBs, 6 paradigms | See references/databases.md
 DEVENV:   5 batches, 18 registered, 16 active + ORAC = 17 | See references/ecosystem.md
-BINARIES: 55+ at ~/.local/bin/ + orac-{sidecar,probe,client} + habitat-probe
+BINARIES: 100+ at ~/.local/bin/ (incl 19 cc-* fleet scripts, fleet-star, orac-{sidecar,probe,client})
+FLEET:    L1 fleet-nav → L2 pane-ctl → L3 fleet-ctl → L4 cc-* toolkit → L5 Battern protocol
 SCHEMAS:  .claude/schemas/{hook_request,hook_response,permission_policy,bus_event,bus_frame}.json
 QUERIES:  .claude/queries/{blackboard,hook_events,fleet_state}.sql
+DOCS:     docs/ (24 active, 12,468L) | ai_docs/ (25) | ai_specs/ (11)
 VAULT:    ~/projects/claude_code/ (215+) | See references/ecosystem.md
 ```
 
@@ -295,7 +302,7 @@ config/default.toml  →  config/{dev|prod}.toml  →  ENV vars  →  CLI args
 | SYNTHEX | synthex.db, v3_homeostasis.db, hebbian_pulse.db, flow_tensor_memory.db | Core state, thermal PID, neural, tensor |
 | DevEnv | service_tracking.db, system_synergy.db, episodic_memory.db | Health history, synergy, sessions |
 | Orchestrator | code.db, tensor_memory.db, performance.db | Modules, SAN-K7 tensors, benchmarks |
-| POVM | povm_data.db | 115 memories, 2,437 pathways |
+| POVM | povm_data.db | 272 memories, 2,573 pathways |
 | RM | TSV flat file | 3,400+ entries |
 
 **Total:** 166 databases, 360.6 MB — 20-30% are empty schemas
@@ -360,14 +367,16 @@ ORAC (needs B5):    orac-sidecar (depends on pane-vortex + povm-engine)
 Binary: `~/.local/bin/devenv` | Config: `~/.config/devenv/devenv.toml` (518L)
 Storm protection: 5 restarts in 60s = storm | Graceful shutdown: 30s
 
-### 58+ Custom Binaries (~/.local/bin/)
+### 100+ Custom Binaries (~/.local/bin/)
 
 **ORAC-specific (3):**
 - `orac-sidecar` (5.5MB) — Main daemon
 - `orac-probe` (2.3MB) — 6-endpoint diagnostics
 - `orac-client` (337KB) — CLI client
 
-**Fleet:** fleet-ctl, fleet-vortex, fleet-heartbeat, fleet-inventory.sh, fleet-nav.sh
+**Fleet (core):** fleet-ctl(26KB), fleet-vortex, fleet-heartbeat(13KB), fleet-inventory.sh(16KB), fleet-nav.sh(8KB)
+**Fleet (enhanced, Session 056+):** fleet-star(17KB, RALPH star tracker), fleet-sphere-sync.sh, fleet-constants.sh, fleet-practice.sh, fleet-verify
+**CC Toolkit (19 scripts, Session 056+):** cc-common.sh(15KB, shared library), cc-dispatch(10KB), cc-scan(8KB), cc-status(10KB), cc-monitor(15KB), cc-harvest(14KB), cc-cascade(6KB), cc-deploy(4KB), cc-capture, cc-abort, cc-replay, cc-audit, cc-bridge, cc-health(8KB), cc-hebbian, cc-thermal, cc-vms(12KB), cc-evolve, cc-fleet-summary
 **Service:** nvim-ctl(26 cmds), pane-ctl, pane-vortex-ctl(22 routes), swarm-ctl
 **Intel:** vault-search, evolution-metrics, reasoning-memory(Rust), habitat-probe(Rust)
 **Build:** quality-gate, build-and-test, shellcheck, code-review
@@ -392,13 +401,35 @@ Key ORAC notes:
 - `[[Session 051 — ORAC Sidecar .claude Scaffolding]]`
 - `[[Session 052 — Phase 1 Hooks Deployed]]`
 - `[[Session 053 — ORAC Phase 2 Intelligence + Gold Standard Audit]]`
+- `[[Session 056 — ORAC God-Tier Mastery]]` — 34 bugs, 31 fixed, cc-* toolkit created
+- `[[Session 057 — ORAC Deep Exploration and PV Coherence Fix]]`
+- `[[Session 058 — GAP-A and GAP-B Fix Deployment]]` — STDP LTP alive, IPC subscribed
+- `[[Session 060 — Habitat Deep Exploration Report]]` — 9-pane fleet, 45 bugs triaged
+- `[[Session 062 — ORAC System Atlas (ACP)]]` — 24 docs, gap-fill, vault renamed
+- `[[ORAC Sidecar — Architecture Schematics]]` — 8 Mermaid diagrams
+- `[[ORAC Sidecar — Diagnostic Schematics]]` — 8 diagnostic diagrams
 - `[[ORAC — RALPH Multi-Parameter Mutation Fix]]`
+- `[[Battern — Patterned Batch Dispatch for Claude Code Fleets]]` — dispatch protocol
+- `[[Fleet Commander — Modularization Plan and Gap Analysis]]` — planned Rust crate
 
 ### Cascade Handoff Protocol
 1. Writer creates tasks/handoff-{target}-{timestamp}.md
 2. Target reads, updates status: in-progress
 3. On completion: status: completed
 4. Tracked in .claude/cascade-state.json
+
+### Battern Protocol (Session 061)
+Patterned batch dispatch — structured multi-pane work with gate checks.
+1. Design: topology, roles (unique per pane), output paths, gate criteria
+2. Dispatch: `battern_dispatch $TAB $DIR "$ROLE_PROMPT"` — each pane gets unique role
+3. Gate: `battern_gate "run-id" $REQUIRED` — poll via /loop until N sources deliver
+4. Collect: `battern_collect "run-id" output.md` — gather all sources
+5. Synthesize: orchestrator reads collection, produces synthesis
+6. Compose (optional): Round N output feeds Round N+1 input
+
+**5 types:** Investigation, Adversarial, Verification, Monitoring, Implementation
+**File-based loop-back:** panes write to `~/projects/shared-context/tasks/{run-id}-{role}.md`
+**Obsidian:** `[[Battern — Patterned Batch Dispatch for Claude Code Fleets]]`
 
 ---
 
@@ -423,7 +454,7 @@ Key ORAC notes:
 
 ### .claude/ Context Files (18 files)
 - `context.json` — Machine-readable module inventory (layers, bridges, hooks, bins)
-- `status.json` — Build phase tracking (all_complete, 1,454 tests)
+- `status.json` — Build phase tracking (all_complete, 1,748 tests)
 - `patterns.json` — 22 patterns (P01-P22)
 - `anti_patterns.json` — 20 anti-patterns (AP01-AP20)
 - `schemas/` — 5 JSON schemas (hook request/response, permission policy, bus event/frame)
@@ -432,7 +463,7 @@ Key ORAC notes:
 
 ---
 
-## GOTCHAS (Accumulated Across 54+ Sessions)
+## GOTCHAS (Accumulated Across 62+ Sessions)
 
 1. **focus-next-pane** — use `move-focus` directionally. focus-next wraps unpredictably
 2. **Chain after pkill** — exit 144 kills the `&&` chain. Always separate with `;` or new command

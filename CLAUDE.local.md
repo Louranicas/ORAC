@@ -1,8 +1,60 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.10.0","status":"EVOLUTION_ACTIVE","phase":"habitat-deep-exploration","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":3,"tests":1690,"loc":32000,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_persisted":true,"ralph_gen":1711,"ralph_fitness":0.581,"ralph_phase":"Learn","synthex_wired":true,"synthex_temp":0.838,"vms_wired":true,"vms_memories":61,"vms_r":0.922,"povm_persist_wired":true,"povm_format_fixed":true,"povm_hydration":"2504 pathways loaded, 0 matched coupling IDs","me_eventbus_confirmed_working":true,"me_observer_subscribed":true,"bridge_urls_fixed":true,"field_poller":true,"coupling_pruning":true,"ipc_client":true,"ipc_connected":true,"ipc_state":"subscribed","orac_client":true,"circuit_breaker_wired":true,"semantic_router_wired":true,"blackboard_wired":true,"blackboard_tables":9,"session_persistence":true,"token_accounting_wired":true,"consent_endpoints":true,"ghost_tracking":true,"chimera_detection":true,"correlation_wired":true,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_total":18,"bugs_fixed_session060":8,"bugs_discovered_fleet":45,"docs_produced":37,"docs_lines":12500,"cc_toolkit_scripts":10,"metabolic_phases_complete":4,"gap_analysis":{"GAP_A":"FIXED_session058","GAP_B":"FIXED_session058","GAP_C":"FIXED_session060_sessions_persisted","GAP_D":"NOT_A_BUG_pull_model_works_271K_events","GAP_E":"SYNTHEX_thermal_working_correctly","GAP_F":"breaker_state_not_persisted_low_priority"},"stdp_ltp_per_tick":6,"stdp_ltd_per_tick":247,"stdp_ids_matched":"36/36","coupling_connections":1260,"coupling_weight_range":"0.150-1.000","field_r":0.922,"sphere_count":36,"emergence_detectors":7,"emergence_events":95,"emergence_field_stability":"ACTIVE_firing","beneficial_sync_threshold":"r>0.85","field_stability_threshold":"r>0.70","field_stability_window":20,"tool_library_port_fix":"BashEngine 8101->8102, NAIS 8102->8101","prometheus_crit01":"POST /api/tasks SIGABRT DoS confirmed","ralph_loop_gens":"7 generations, gen1-4 complete with code fixes","fleet_exploration":"9 panes, 6 agents, 12500+ lines findings","next_actions":["wire_DispatchLoop_detector","fix_prometheus_crash_binary","git_commit_push","update_obsidian_master_index"],"obsidian_notes_created":26,"session":"060"}
+{"v":"0.11.0","status":"EVOLUTION_ACTIVE","phase":"documentation-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":4,"tests":1748,"loc":41369,"files":55,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_persisted":true,"ralph_gen":5678,"ralph_fitness":0.779,"ralph_phase":"Learn","synthex_wired":true,"synthex_temp":0.622,"vms_wired":true,"povm_persist_wired":true,"povm_format_fixed":true,"me_eventbus_confirmed_working":true,"me_observer_subscribed":true,"bridge_urls_fixed":true,"field_poller":true,"coupling_pruning":true,"ipc_client":true,"ipc_connected":true,"ipc_state":"subscribed","orac_client":true,"circuit_breaker_wired":true,"semantic_router_wired":true,"blackboard_wired":true,"blackboard_tables":10,"session_persistence":true,"token_accounting_wired":true,"consent_endpoints":true,"ghost_tracking":true,"chimera_detection":true,"correlation_wired":true,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_total":22,"orac_state_fields":32,"busframe_variants":11,"bugs_fixed_session060":8,"bugs_discovered_fleet":45,"docs_active":24,"docs_active_lines":12468,"docs_archived":9,"docs_archived_lines":4023,"gap_fill_docs":5,"gap_fill_lines":3193,"cc_instances_session062":40,"acp_rounds":5,"gap_analysis":{"GAP_A":"FIXED_session058","GAP_B":"FIXED_session058","GAP_C":"FIXED_session060","GAP_D":"NOT_A_BUG","GAP_E":"WORKING","GAP_F":"LOW_PRIORITY"},"coupling_connections":1406,"coupling_weight_mean":0.1796,"field_r":0.0,"sphere_count":0,"emergence_events":4585,"emergence_monitors":50,"ltp_total":3182,"ltd_total":60875,"ltp_ltd_ratio":0.0523,"vault_renamed":"maintenance-engine-v2 → the-habitat-docs","vault_files":121,"vault_links":109,"vault_broken_links":0,"obsidian_notes_created":32,"star_tracker_entries":19,"session":"062","next_actions":["deploy_session060_ignition_core","git_commit_push_session062","wire_DispatchLoop_detector","fix_prometheus_crash","profile_stdp_at_200_spheres"]}
 ```
+
+---
+
+## Session 062 — ORAC System Atlas + Gap Fill (2026-03-25/26)
+
+**Status:** DOCUMENTATION COMPLETE — 24 active docs (12,468L), 5 gap-fill docs, vault renamed, RALPH at gen 5,678.
+
+### Resume Protocol
+1. Run `/primehabitat` then `/deephabitat`
+2. Read this file
+3. ORAC running on :8133 with RALPH gen=5,678+, fitness=0.779, 17/17 services
+4. All docs at `orac-sidecar/docs/` (24 active files)
+5. Vault renamed: `the-habitat-docs/` (was `maintenance-engine-v2/`)
+6. Session 060 deployment plan STILL PENDING (Ignition Core ~110 LOC)
+
+### What Was Done
+- **ORAC System Atlas (ACP):** 3 rounds, 29 CC instances, 8 deliverables (D1-D8), 9 fleet reports, 10 verification reports
+- **Gap Analysis:** Audited 5 developer concerns, found ADR/runbook/glossary/scaling/debug gaps
+- **ACP Gap Plan Review:** 2 rounds, corrected from 6→5 docs, added CONTRIBUTING + PRODUCTION_READINESS
+- **Gap-Fill:** ADR_INDEX (624L, 15 ADRs), OPERATIONS (1,396L, 25 SYMs), GLOSSARY (348L, 104 terms), CONTRIBUTING (465L, 0 AI refs), PRODUCTION_READINESS (360L)
+- **D6 Scaling Merge:** +260L (complexity, bottleneck, O(N²), SQLite contention, projections)
+- **EXECUTIVE_SUMMARY:** Added 4 audience reading paths (developer/ops/architect/AI)
+- **R1 Fleet Archived:** 9 files → docs/archive/R1/ (superseded)
+- **Vault Renamed:** maintenance-engine-v2/ → the-habitat-docs/, Obsidian config updated
+- **Cross References:** 18 files in Cross References/ subdir (borrowed, labeled)
+- **Empty Files Fixed:** 4 files populated from source vaults
+- **Links Verified:** 109 wikilinks, 0 broken
+
+### Key ACP Corrections
+- BusFrame: single enum (11 variants), NOT ClientFrame/ServerFrame
+- OracState: 32 fields (not 56)
+- Routes: 22 (not 18 or 23)
+- Bridge calls: blocking sync in RALPH tick loop (not fire-and-forget)
+- Schematic labels: 14/40 were wrong, all corrected in D8
+- Entire doc corpus was AI-oriented — CONTRIBUTING.md addresses human developers
+
+### RALPH Autonomous Evolution (20+ hours unattended)
+- Gen: 1,711 → 5,678 (+3,967 generations)
+- Fitness: 0.581 → 0.779 (+34%)
+- Emergence: 95 → 4,585 (+4,490 events)
+- LTP/LTD ratio: 0.0735 → 0.052 (declining — fleet idle, will recover)
+
+### Obsidian
+- `[[Session 062 — ORAC System Atlas (ACP)]]` — main note (32 bidirectional links)
+- `[[Session 062 — Reflections and Learnings]]` — reflections
+- `[[Adversarial Convergence Protocol]]` — updated with Session 062 metrics
+- `[[ULTRAPLATE Master Index]]` — updated with ORAC atlas deliverable table
+- Vault: `the-habitat-docs/` (121 files, 0 broken links)
+
+### Quality Gate
+- 1,748 tests (--features full) — 0 failures
+- `cargo clippy -D warnings -W clippy::pedantic` — 0 warnings
 
 ---
 

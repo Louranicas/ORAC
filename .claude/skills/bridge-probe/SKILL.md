@@ -1,8 +1,9 @@
 ---
 name: bridge-probe
-user-invocable: true
 description: Probe ORAC bridge health and connectivity to SYNTHEX, ME, POVM, RM, and PV2. Checks port availability, endpoint responses, data format compliance, and circuit breaker state. Use when bridges are failing, verifying bridge wiring, or diagnosing service connectivity issues.
-argument-hint: [all|synthex|me|povm|rm|pv2|circuit]
+allowed-tools:
+  - Bash
+  - Read
 ---
 
 # /bridge-probe — ORAC Bridge Health Probe

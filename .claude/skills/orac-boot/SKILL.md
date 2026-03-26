@@ -1,8 +1,9 @@
 ---
 name: orac-boot
-user-invocable: true
 description: Bootstrap ORAC sidecar knowledge — loads architecture (8 layers, 40 modules), hook endpoints (6 events), IPC wire protocol, bridge topology, candidate module status, and build phase tracking. Use at session start, when user says "boot orac", "orac status", or when Claude needs full ORAC operational capability.
-argument-hint: [verify|full]
+allowed-tools:
+  - Bash
+  - Read
 ---
 
 # /orac-boot — ORAC Sidecar Bootstrap
