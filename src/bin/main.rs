@@ -1804,6 +1804,33 @@ fn spawn_ralph_loop(
                             if let Err(e) = bb.prune_consent_audit(500) {
                                 tracing::debug!("consent_audit prune error: {e}");
                             }
+
+                            // BUG-064m fix: Prune zombie sessions from in-memory map.
+                            // Sessions from crashed Claude instances (0 tool calls, >1 hour)
+                            // accumulate indefinitely. Remove stale sessions every 60 ticks.
+                            {
+                                let now_ms = orac_sidecar::m3_hooks::m10_hook_server::epoch_ms();
+                                let one_hour_ms = 3_600_000;
+                                let mut sessions = state.sessions.write();
+                                let stale_ids: Vec<String> = sessions
+                                    .iter()
+                                    .filter(|(_, t)| {
+                                        t.total_tool_calls == 0
+                                            && now_ms.saturating_sub(t.started_ms) > one_hour_ms
+                                    })
+                                    .map(|(id, _)| id.clone())
+                                    .collect();
+                                if !stale_ids.is_empty() {
+                                    let count = stale_ids.len();
+                                    for id in &stale_ids {
+                                        sessions.remove(id);
+                                    }
+                                    tracing::info!(
+                                        pruned = count,
+                                        "Zombie sessions pruned (0 tools, >1h old)"
+                                    );
+                                }
+                            }
                         }
                     }
                 }

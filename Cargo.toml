@@ -6,6 +6,10 @@ rust-version = "1.75"
 description = "ORAC — Intelligent fleet coordination proxy with HTTP hooks, Hebbian STDP, and RALPH evolution"
 authors = ["Louranicas <louranicas@github.com>"]
 license = "MIT"
+repository = "https://gitlab.com/lukeomahoney/orac-sidecar"
+readme = "README.md"
+keywords = ["fleet-coordination", "hebbian", "kuramoto", "hooks", "evolution"]
+categories = ["development-tools", "network-programming"]
 
 [workspace]
 
