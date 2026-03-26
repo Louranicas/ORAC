@@ -92,16 +92,9 @@ pub async fn handle_post_tool_use(
     // Increment global tool call counter for cascade heat computation (Gen 9)
     state.total_tool_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // Record token usage estimate (input ≈ tool_input chars/4, output ≈ tool_output chars/4)
-    #[cfg(feature = "monitoring")]
-    {
-        #[allow(clippy::cast_possible_truncation)]
-        let input_tokens = (summary.len() / 4).max(1) as u64;
-        #[allow(clippy::cast_possible_truncation)]
-        let output_tokens = (tool_output.len() / 4).max(1) as u64;
-        let pane = crate::m1_core::m01_core_types::PaneId::new(&pane_id_str);
-        let _ = state.token_accountant.record_pane_usage(&pane, input_tokens, output_tokens);
-    }
+    // BUG-064s fix: Removed duplicate token recording that was double-counting
+    // all usage. The single recording at line ~159 (BUG-GEN07 fix) is the correct
+    // one — it handles errors and uses the proper pane_id from session tracking.
 
     // 1. Record memory (fire-and-forget)
     let mem_url = format!("{}/sphere/{}/memory", state.pv2_url, pane_id_str);
