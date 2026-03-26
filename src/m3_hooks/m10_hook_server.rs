@@ -28,6 +28,7 @@
 //! - `ureq` for synchronous HTTP to PV2/SYNTHEX/POVM/RM via `spawn_blocking`
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -502,6 +503,10 @@ pub struct OracState {
     /// Token accounting registry for `/tokens` endpoint (feature-gated).
     #[cfg(feature = "monitoring")]
     pub token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant,
+    /// Gen-064a: One-shot flag for deferred coupling weight hydration.
+    /// Set to `true` after the first successful hydration in the field poller.
+    /// Prevents repeated hydration attempts on every poller tick.
+    pub coupling_hydrated: AtomicBool,
 }
 
 impl OracState {
@@ -550,6 +555,7 @@ impl OracState {
             dashboard: crate::m7_monitoring::m34_field_dashboard::FieldDashboard::new(),
             #[cfg(feature = "monitoring")]
             token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant::new(),
+            coupling_hydrated: AtomicBool::new(false),
         }
     }
 
@@ -604,6 +610,7 @@ impl OracState {
             dashboard: crate::m7_monitoring::m34_field_dashboard::FieldDashboard::new(),
             #[cfg(feature = "monitoring")]
             token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant::new(),
+            coupling_hydrated: AtomicBool::new(false),
         }
     }
 
@@ -1267,6 +1274,38 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                             "Coupling network synced with PV2 spheres"
                         );
                     }
+                }
+            }
+
+            // Gen-064a: Deferred coupling weight hydration.
+            // At startup, the coupling network is empty (no spheres registered yet),
+            // so hydrate_startup_state() restores 0 weights. Now that spheres are
+            // synced from PV2 and connections exist, apply saved weights one-shot.
+            #[cfg(all(feature = "persistence", feature = "intelligence"))]
+            if !state.coupling_hydrated.load(std::sync::atomic::Ordering::Relaxed) {
+                let net_size = state.coupling.read().connections.len();
+                if net_size > 0 {
+                    if let Some(bb) = state.blackboard() {
+                        if let Ok(saved) = bb.load_coupling_weights() {
+                            let mut network = state.coupling.write();
+                            let mut restored = 0u32;
+                            for cw in &saved {
+                                let from = PaneId::new(&cw.from_id);
+                                let to = PaneId::new(&cw.to_id);
+                                if network.get_weight(&from, &to).is_some() {
+                                    network.set_weight(&from, &to, cw.weight.clamp(0.0, 1.0));
+                                    restored += 1;
+                                }
+                            }
+                            tracing::info!(
+                                saved = saved.len(),
+                                restored,
+                                connections = network.connections.len(),
+                                "Deferred coupling weight hydration complete"
+                            );
+                        }
+                    }
+                    state.coupling_hydrated.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 

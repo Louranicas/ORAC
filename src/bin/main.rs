@@ -1602,12 +1602,18 @@ fn spawn_ralph_loop(
 
                             // IGNITION-1e: Persist coupling weights to blackboard
                             // every 60 ticks so Hebbian learning survives restarts.
+                            // Gen-064a: Filter to only save connections where BOTH endpoints
+                            // are registered PV2 spheres. Prevents accumulating dead
+                            // orac:PID:UUID entries that can never be restored.
                             #[cfg(feature = "intelligence")]
                             {
+                                let sphere_ids: std::collections::HashSet<_> =
+                                    state.field_state.read().spheres.keys().cloned().collect();
                                 let net = state.coupling.read();
                                 let saved_weights: Vec<_> = net
                                     .connections
                                     .iter()
+                                    .filter(|c| sphere_ids.contains(&c.from) && sphere_ids.contains(&c.to))
                                     .map(|c| {
                                         orac_sidecar::m5_bridges::m26_blackboard::SavedCouplingWeight {
                                             from_id: c.from.as_str().to_owned(),
