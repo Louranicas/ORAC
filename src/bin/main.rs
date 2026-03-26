@@ -1464,12 +1464,16 @@ fn spawn_ralph_loop(
                             let w_mean = net.connections.iter().map(|c| c.weight).sum::<f64>() / n;
                             let floor = orac_sidecar::m1_core::m04_constants::HEBBIAN_WEIGHT_FLOOR;
                             let mut nudged = 0u32;
+                            // BUG-064a fix: Use soft ceiling (0.85) and wider epsilon (0.01).
+                            // Previous code checked weight==1.0 (never true since STDP
+                            // caps at 0.85) and floor with 1e-10 epsilon (too tight).
+                            let soft_ceiling = 0.85_f64;
                             for conn in &mut net.connections {
                                 let old = conn.weight;
-                                if (conn.weight - 1.0).abs() < 1e-10 {
+                                if (conn.weight - soft_ceiling).abs() < 0.01 {
                                     // Ceiling: multiplicative decay toward mean
                                     conn.weight = 0.98f64.mul_add(conn.weight, 0.02 * w_mean);
-                                } else if (conn.weight - floor).abs() < 1e-10 {
+                                } else if (conn.weight - floor).abs() < 0.01 {
                                     // Floor: small additive boost toward mean
                                     conn.weight = (conn.weight + 0.005).min(w_mean);
                                 }
