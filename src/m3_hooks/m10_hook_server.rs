@@ -615,7 +615,11 @@ impl OracState {
     }
 
     /// Register a new session.
-    pub fn register_session(&self, session_id: String, pane_id: PaneId) {
+    ///
+    /// BUG-064o fix: If a session with the same ID already exists, log a
+    /// warning and replace it. The old session's sphere should be deregistered
+    /// by the caller (`SessionStart` handler) to prevent orphan connections.
+    pub fn register_session(&self, session_id: &str, pane_id: PaneId) {
         let tracker = SessionTracker {
             pane_id,
             active_task_id: None,
@@ -625,7 +629,15 @@ impl OracState {
             started_ms: epoch_ms(),
             persona: String::new(),
         };
-        self.sessions.write().insert(session_id, tracker);
+        let mut sessions = self.sessions.write();
+        if let Some(old) = sessions.insert(session_id.to_owned(), tracker) {
+            tracing::warn!(
+                session_id,
+                old_pane = old.pane_id.as_str(),
+                old_tools = old.total_tool_calls,
+                "Duplicate SessionStart — replaced existing session"
+            );
+        }
     }
 
     /// Remove a session.
@@ -682,8 +694,8 @@ impl OracState {
             if let Err(e) = bb.insert_ghost(&record) {
                 tracing::debug!("blackboard insert_ghost failed: {e}");
             }
-            // Keep SQLite bounded to 100 entries
-            let _ = bb.prune_ghosts(100);
+            // BUG-064t fix: Align SQLite ghost cap with GHOST_MAX (20), not 100.
+            let _ = bb.prune_ghosts(MAX_GHOSTS);
         }
 
         // In-memory ring buffer
@@ -2329,6 +2341,10 @@ pub fn build_router(state: Arc<OracState>) -> Router {
             post(super::m14_permission_policy::handle_permission_request),
         )
         .with_state(state)
+        // SEC-004 fix: Apply HTTP body size limit to prevent OOM from oversized POSTs.
+        // Uses the body_limit_bytes from config (default 65,536 bytes = 64KB).
+        // Without this, any POST endpoint can be OOM'd with a multi-GB payload.
+        .layer(axum::extract::DefaultBodyLimit::max(65_536))
 }
 
 // ──────────────────────────────────────────────────────────────

@@ -9,6 +9,17 @@ EVENT="${1:-unknown}"
 TIMEOUT="${2:-5}"
 ORAC_URL="${ORAC_URL:-http://localhost:8133}"
 
+# SEC-003 fix: Validate EVENT against known hook names to prevent
+# path traversal (../../consent/id) or injection via crafted event names.
+case "$EVENT" in
+    SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|PermissionRequest)
+        ;;
+    *)
+        # Unknown event — silently ignore, never block Claude Code
+        exit 0
+        ;;
+esac
+
 # Read hook event from stdin (Claude Code pipes the event payload)
 BODY="$(cat 2>/dev/null)" || true
 [ -z "$BODY" ] && BODY='{}'

@@ -850,6 +850,40 @@ impl Blackboard {
         Ok(deleted)
     }
 
+    /// BUG-064q fix: Prune oldest `hebbian_summary` rows, keeping the newest `keep`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on `SQLite` failure.
+    pub fn prune_hebbian_summaries(&self, keep: usize) -> PvResult<usize> {
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM hebbian_summary WHERE rowid NOT IN
+                 (SELECT rowid FROM hebbian_summary ORDER BY tick DESC LIMIT ?1)",
+                params![keep],
+            )
+            .map_err(|e| PvError::Database(format!("prune_hebbian_summaries: {e}")))?;
+        Ok(deleted)
+    }
+
+    /// BUG-064r fix: Prune oldest `consent_audit` rows, keeping the newest `keep`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on `SQLite` failure.
+    pub fn prune_consent_audit(&self, keep: usize) -> PvResult<usize> {
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM consent_audit WHERE rowid NOT IN
+                 (SELECT rowid FROM consent_audit ORDER BY rowid DESC LIMIT ?1)",
+                params![keep],
+            )
+            .map_err(|e| PvError::Database(format!("prune_consent_audit: {e}")))?;
+        Ok(deleted)
+    }
+
     // ── Consent declarations ──
 
     /// Upsert a consent declaration for a sphere.

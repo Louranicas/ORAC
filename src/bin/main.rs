@@ -328,11 +328,22 @@ fn spawn_ipc_listener(state: Arc<OracState>) {
                     }
                     Err(e) => {
                         total_reconnects += 1;
-                        tracing::warn!(
-                            total_reconnects,
-                            delay_secs = reconnect_delay_secs,
-                            "IPC recv error: {e} — reconnecting"
-                        );
+                        // BUG-064f fix: 300s idle timeout is expected behavior (keepalive
+                        // cycle). Use debug level to avoid noisy WARN every 5 minutes.
+                        // Only escalate to warn after 5+ consecutive reconnects.
+                        if total_reconnects % 5 == 0 {
+                            tracing::warn!(
+                                total_reconnects,
+                                delay_secs = reconnect_delay_secs,
+                                "IPC recv error (persistent): {e} — reconnecting"
+                            );
+                        } else {
+                            tracing::debug!(
+                                total_reconnects,
+                                delay_secs = reconnect_delay_secs,
+                                "IPC recv timeout — reconnecting"
+                            );
+                        }
                         // BUG-057l fix: explicitly disconnect to release socket state
                         // before attempting reconnection (prevents fd/buffer accumulation)
                         let _ = client.disconnect().await;
@@ -1783,6 +1794,15 @@ fn spawn_ralph_loop(
                                 Ok(0) => {}
                                 Ok(n) => tracing::info!(pruned = n, "Blackboard: pruned stale panes"),
                                 Err(e) => tracing::debug!("Blackboard prune error: {e}"),
+                            }
+                            // BUG-064q+r fix: Prune unbounded tables every 60 ticks.
+                            // hebbian_summary grows ~14,400 rows/day without pruning.
+                            // consent_audit grows ~2,700 rows/day without pruning.
+                            if let Err(e) = bb.prune_hebbian_summaries(1000) {
+                                tracing::debug!("hebbian_summary prune error: {e}");
+                            }
+                            if let Err(e) = bb.prune_consent_audit(500) {
+                                tracing::debug!("consent_audit prune error: {e}");
                             }
                         }
                     }

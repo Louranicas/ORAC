@@ -69,7 +69,7 @@ pub async fn handle_session_start(
     let rm_count = parse_rm_count(rm_data.as_deref());
 
     // Track session
-    state.register_session(session_id, pane_id.clone());
+    state.register_session(&session_id, pane_id.clone());
 
     // Register in coupling network for semantic routing
     // Uses register() to create bidirectional connections, rebuild adjacency
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn stop_tracker_no_task() {
         let s = OracState::new(crate::m1_core::m03_config::PvConfig::default());
-        s.register_session("s".into(), crate::m1_core::m01_core_types::PaneId::new("p"));
+        s.register_session("s", crate::m1_core::m01_core_types::PaneId::new("p"));
         let t = s.remove_session("s");
         assert!(t.is_some());
         assert!(t.unwrap().active_task_id.is_none());
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn stop_tracker_with_task() {
         let s = OracState::new(crate::m1_core::m03_config::PvConfig::default());
-        s.register_session("s".into(), crate::m1_core::m01_core_types::PaneId::new("p"));
+        s.register_session("s", crate::m1_core::m01_core_types::PaneId::new("p"));
         { let mut ss = s.sessions.write(); if let Some(t) = ss.get_mut("s") { t.active_task_id = Some("task-42".into()); } }
         let t = s.remove_session("s");
         assert_eq!(t.unwrap().active_task_id.as_deref(), Some("task-42"));

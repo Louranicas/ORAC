@@ -89,13 +89,15 @@ impl PermissionPolicy {
     /// Evaluate the policy for a given tool name.
     #[must_use]
     pub fn evaluate(&self, tool_name: &str) -> Decision {
-        if self.always_deny.iter().any(|t| t == tool_name) {
+        // SEC-002 fix: case-insensitive comparison prevents bypass via
+        // "bash" vs "Bash" or Unicode homoglyph variants.
+        if self.always_deny.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
             return Decision::Deny;
         }
-        if self.always_approve.iter().any(|t| t == tool_name) {
+        if self.always_approve.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
             return Decision::Allow;
         }
-        if self.approve_with_notice.iter().any(|t| t == tool_name) {
+        if self.approve_with_notice.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
             return Decision::AllowWithNotice;
         }
         if self.default_approve {
@@ -135,7 +137,10 @@ pub async fn handle_permission_request(
     State(_state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
 ) -> Json<HookResponse> {
-    let tool_name = event.tool_name.as_deref().unwrap_or("unknown");
+    // SEC-001 fix: Normalize tool name (trim whitespace) before evaluation.
+    // SEC-002 fix: Case-insensitive comparison via lowercase normalization.
+    let raw_tool = event.tool_name.as_deref().unwrap_or("unknown");
+    let tool_name = raw_tool.trim();
 
     let policy = PermissionPolicy::default();
     let decision = policy.evaluate(tool_name);

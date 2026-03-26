@@ -192,11 +192,18 @@ impl Point3D {
         let dot = a.dot(b).clamp(-1.0, 1.0);
         let omega = dot.acos();
 
-        if omega.abs() < f64::EPSILON {
+        // BUG-064p fix: Use sqrt(EPSILON) (~1.5e-8) instead of EPSILON (~2.2e-16).
+        // Near-zero omega produces sin_omega ≈ 0 which causes NaN from division.
+        // sqrt(EPSILON) is the standard guard for trig-based computations.
+        if omega.abs() < f64::EPSILON.sqrt() {
             return a;
         }
 
         let sin_omega = omega.sin();
+        // Guard against sin_omega ≈ 0 (omega near 0 or PI)
+        if sin_omega.abs() < f64::EPSILON.sqrt() {
+            return a;
+        }
         let sa = ((1.0 - t) * omega).sin() / sin_omega;
         let sb = (t * omega).sin() / sin_omega;
 
