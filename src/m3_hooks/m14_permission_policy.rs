@@ -23,6 +23,8 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::m1_core::m03_config::HooksConfig;
+
 use super::m10_hook_server::{HookEvent, HookResponse, OracState};
 
 // ──────────────────────────────────────────────────────────────
@@ -122,6 +124,53 @@ impl PermissionPolicy {
             self.always_deny.push(tool);
         }
     }
+
+    /// Build a permission policy from hooks configuration (SEC-001 fix).
+    ///
+    /// Parses `auto_approve.patterns` from `hooks.toml`:
+    /// - Bare tool names (e.g. `"Read"`) go into `always_approve`
+    /// - `Tool:pattern` entries (e.g. `"Bash:git status*"`) extract the bare
+    ///   tool name for policy matching; the glob suffix is reserved for
+    ///   future sub-command gating
+    ///
+    /// Write tools (`Edit`, `Write`, `Bash`, `NotebookEdit`) not present in
+    /// `auto_approve` are placed into `approve_with_notice`. All other
+    /// unknown tools fall through to `default_approve`.
+    #[must_use]
+    pub fn from_config(hooks: &HooksConfig) -> Self {
+        const WRITE_TOOLS: &[&str] = &["Edit", "Write", "Bash", "NotebookEdit"];
+
+        // Extract bare tool names (strip `:suffix` if present), deduplicate
+        let mut always_approve: Vec<String> = Vec::new();
+        for pattern in &hooks.auto_approve.patterns {
+            let bare = pattern.split(':').next().unwrap_or(pattern);
+            if !always_approve.iter().any(|t| t.eq_ignore_ascii_case(bare)) {
+                always_approve.push(bare.to_string());
+            }
+        }
+
+        // Standard read-only tools that should always be approved even if
+        // omitted from the TOML (backward compat with PermissionPolicy::default)
+        for tool in &["Read", "Glob", "Grep", "LS", "Agent", "WebSearch", "WebFetch", "TodoRead", "TodoWrite"] {
+            if !always_approve.iter().any(|t| t.eq_ignore_ascii_case(tool)) {
+                always_approve.push((*tool).to_string());
+            }
+        }
+
+        // Write tools not auto-approved get notice treatment
+        let approve_with_notice: Vec<String> = WRITE_TOOLS
+            .iter()
+            .filter(|t| !always_approve.iter().any(|a| a.eq_ignore_ascii_case(t)))
+            .map(|t| (*t).to_string())
+            .collect();
+
+        Self {
+            always_approve,
+            approve_with_notice,
+            always_deny: Vec::new(),
+            default_approve: true,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -134,16 +183,16 @@ impl PermissionPolicy {
 /// an appropriate response. Auto-approves read-only tools, approves
 /// write tools with notice, and denies explicitly blocked tools.
 pub async fn handle_permission_request(
-    State(_state): State<Arc<OracState>>,
+    State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
 ) -> Json<HookResponse> {
-    // SEC-001 fix: Normalize tool name (trim whitespace) before evaluation.
-    // SEC-002 fix: Case-insensitive comparison via lowercase normalization.
+    // SEC-001 fix: Use policy from OracState (loaded from hooks.toml at startup),
+    // not a throwaway PermissionPolicy::default() per request.
+    // SEC-002 fix: Case-insensitive comparison via policy.evaluate().
     let raw_tool = event.tool_name.as_deref().unwrap_or("unknown");
     let tool_name = raw_tool.trim();
 
-    let policy = PermissionPolicy::default();
-    let decision = policy.evaluate(tool_name);
+    let decision = state.permission_policy.evaluate(tool_name);
 
     match decision {
         Decision::Allow => Json(HookResponse::empty()),
@@ -363,5 +412,83 @@ mod tests {
                 "{tool} should have notice"
             );
         }
+    }
+
+    // ── from_config (SEC-001) ──
+
+    fn default_hooks_config() -> HooksConfig {
+        HooksConfig::default()
+    }
+
+    #[test]
+    fn from_config_default_approves_read_tools() {
+        let policy = PermissionPolicy::from_config(&default_hooks_config());
+        for tool in &["Read", "Glob", "Grep", "LS", "Agent", "WebSearch", "WebFetch"] {
+            assert_eq!(
+                policy.evaluate(tool),
+                Decision::Allow,
+                "{tool} should be auto-approved via from_config"
+            );
+        }
+    }
+
+    #[test]
+    fn from_config_bash_auto_approved_from_patterns() {
+        // Default hooks.toml has "Bash:ls *", "Bash:git status*" etc.
+        // The bare tool name "Bash" is extracted and auto-approved.
+        let policy = PermissionPolicy::from_config(&default_hooks_config());
+        assert_eq!(policy.evaluate("Bash"), Decision::Allow);
+    }
+
+    #[test]
+    fn from_config_write_tools_not_in_patterns_get_notice() {
+        // Edit, Write, NotebookEdit are not in default auto_approve patterns
+        let policy = PermissionPolicy::from_config(&default_hooks_config());
+        assert_eq!(policy.evaluate("Edit"), Decision::AllowWithNotice);
+        assert_eq!(policy.evaluate("Write"), Decision::AllowWithNotice);
+        assert_eq!(policy.evaluate("NotebookEdit"), Decision::AllowWithNotice);
+    }
+
+    #[test]
+    fn from_config_deduplicates_bash_patterns() {
+        // Multiple "Bash:*" patterns should yield only one "Bash" entry
+        let mut hooks = default_hooks_config();
+        hooks.auto_approve.patterns = vec![
+            "Bash:ls *".into(),
+            "Bash:git status*".into(),
+            "Bash:cargo build".into(),
+        ];
+        let policy = PermissionPolicy::from_config(&hooks);
+        let bash_count = policy
+            .always_approve
+            .iter()
+            .filter(|t| t.eq_ignore_ascii_case("Bash"))
+            .count();
+        assert_eq!(bash_count, 1, "Bash should appear exactly once");
+    }
+
+    #[test]
+    fn from_config_custom_patterns_override() {
+        let mut hooks = default_hooks_config();
+        hooks.auto_approve.patterns = vec!["CustomTool".into()];
+        let policy = PermissionPolicy::from_config(&hooks);
+        assert_eq!(policy.evaluate("CustomTool"), Decision::Allow);
+        // Standard read-only tools still auto-approved (backward compat)
+        assert_eq!(policy.evaluate("Read"), Decision::Allow);
+    }
+
+    #[test]
+    fn from_config_empty_patterns_still_has_read_tools() {
+        let mut hooks = default_hooks_config();
+        hooks.auto_approve.patterns = Vec::new();
+        let policy = PermissionPolicy::from_config(&hooks);
+        assert_eq!(policy.evaluate("Read"), Decision::Allow);
+        assert_eq!(policy.evaluate("Glob"), Decision::Allow);
+    }
+
+    #[test]
+    fn from_config_unknown_tool_defaults_allow() {
+        let policy = PermissionPolicy::from_config(&default_hooks_config());
+        assert_eq!(policy.evaluate("SomethingNew"), Decision::Allow);
     }
 }

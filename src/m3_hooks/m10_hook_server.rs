@@ -432,6 +432,8 @@ pub struct SessionTracker {
 pub struct OracState {
     /// ORAC configuration (immutable after startup).
     pub config: PvConfig,
+    /// Permission policy built from hooks config at startup (SEC-001 fix).
+    pub permission_policy: super::m14_permission_policy::PermissionPolicy,
     /// Cached field state from PV2 daemon.
     pub field_state: SharedState,
     /// PV2 daemon HTTP URL.
@@ -513,11 +515,14 @@ impl OracState {
     /// Create a new `OracState` from configuration.
     #[must_use]
     pub fn new(config: PvConfig) -> Self {
+        let permission_policy =
+            super::m14_permission_policy::PermissionPolicy::from_config(&config.hooks);
         Self {
             pv2_url: "http://127.0.0.1:8132".into(),
             synthex_url: "http://127.0.0.1:8090".into(),
             povm_url: "http://127.0.0.1:8125".into(),
             rm_url: "http://127.0.0.1:8130".into(),
+            permission_policy,
             config,
             field_state: field_state::new_shared_state(),
             sessions: RwLock::new(HashMap::new()),
@@ -568,7 +573,10 @@ impl OracState {
         povm_url: String,
         rm_url: String,
     ) -> Self {
+        let permission_policy =
+            super::m14_permission_policy::PermissionPolicy::from_config(&config.hooks);
         Self {
+            permission_policy,
             config,
             field_state: field_state::new_shared_state(),
             pv2_url,

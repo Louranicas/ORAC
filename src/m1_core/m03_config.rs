@@ -46,6 +46,8 @@ pub struct PvConfig {
     pub persistence: PersistenceConfig,
     /// Governance voting thresholds.
     pub governance: GovernanceConfig,
+    /// Hook-layer configuration (permission policy, timeouts, thermal gate).
+    pub hooks: HooksConfig,
 }
 
 impl PvConfig {
@@ -450,6 +452,116 @@ impl Default for GovernanceConfig {
             proposal_voting_window_ticks: 5,
             quorum_threshold: 0.5,
             max_active_proposals: 10,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Hooks config (loaded from config/hooks.toml)
+// ──────────────────────────────────────────────────────────────
+
+/// Hook-layer configuration loaded from `config/hooks.toml`.
+///
+/// Controls permission policy, per-event timeouts, and thermal gate
+/// thresholds. Loaded once at startup and stored on `OracState`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Timeout settings per hook event (milliseconds).
+    pub timeouts: HookTimeouts,
+    /// Permission auto-approve policy patterns.
+    pub auto_approve: AutoApproveConfig,
+    /// Thermal gate thresholds for hook throttling.
+    pub thermal: ThermalGateConfig,
+}
+
+impl HooksConfig {
+    /// Load hooks config from `config/hooks.toml` with env overlay.
+    ///
+    /// Falls back to defaults if the file does not exist.
+    ///
+    /// # Errors
+    /// Returns [`PvError::ConfigLoad`] if the file exists but cannot be parsed.
+    pub fn load() -> PvResult<Self> {
+        let config: Self = Figment::new()
+            .merge(Toml::file("config/hooks.toml"))
+            .merge(Env::prefixed("ORAC_HOOKS_").split("_"))
+            .extract()?;
+        Ok(config)
+    }
+}
+
+/// Per-event timeout configuration (milliseconds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HookTimeouts {
+    /// `PreToolUse` handler timeout.
+    pub pre_tool_use_ms: u64,
+    /// `PostToolUse` handler timeout.
+    pub post_tool_use_ms: u64,
+    /// `PreCompact` handler timeout.
+    pub pre_compact_ms: u64,
+    /// `Notification` handler timeout.
+    pub notification_ms: u64,
+}
+
+impl Default for HookTimeouts {
+    fn default() -> Self {
+        Self {
+            pre_tool_use_ms: 2000,
+            post_tool_use_ms: 1000,
+            pre_compact_ms: 5000,
+            notification_ms: 500,
+        }
+    }
+}
+
+/// Auto-approve patterns from `hooks.toml` `[auto_approve]` section.
+///
+/// Patterns can be bare tool names (`"Read"`) or tool:glob entries
+/// (`"Bash:git status*"`). The bare tool name is extracted for policy
+/// matching; the glob suffix is reserved for future sub-command gating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoApproveConfig {
+    /// Glob-style tool patterns that bypass full evaluation.
+    pub patterns: Vec<String>,
+}
+
+impl Default for AutoApproveConfig {
+    fn default() -> Self {
+        Self {
+            patterns: vec![
+                "Read".into(),
+                "Glob".into(),
+                "Grep".into(),
+                "Bash:ls *".into(),
+                "Bash:git status*".into(),
+                "Bash:git diff*".into(),
+                "Bash:git log*".into(),
+            ],
+        }
+    }
+}
+
+/// Thermal gate thresholds for hook throttling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThermalGateConfig {
+    /// Temperature above which a warning is injected.
+    pub warn_temp: f64,
+    /// Temperature above which tools are blocked.
+    pub critical_temp: f64,
+    /// Ticks to wait after a critical block before re-evaluating.
+    pub cooldown_ticks: u64,
+}
+
+impl Default for ThermalGateConfig {
+    fn default() -> Self {
+        Self {
+            warn_temp: 0.7,
+            critical_temp: 0.9,
+            cooldown_ticks: 10,
         }
     }
 }
