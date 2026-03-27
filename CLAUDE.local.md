@@ -27,6 +27,7 @@
 | `/acp` | Adversarial Convergence Protocol (3 rounds) |
 | `/battern` | Fleet batch dispatch (roles + gates + collect) |
 | `/nerve` | Continuous Nerve Center dashboard (10s refresh) |
+| `/propagate` | Push command table to all service CLAUDE.md files |
 
 ### Session 064 Achievements
 - 20 bugs fixed across ORAC + PV2 + SYNTHEX (11 GitLab commits, ~300 LOC)

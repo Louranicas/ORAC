@@ -29,6 +29,7 @@ At the start of every new context window:
 | `/acp` | Adversarial Convergence Protocol: 3 rounds of distributed intelligence with gates. |
 | `/battern` | Patterned fleet batch dispatch: roles → gate → collect → synthesize. |
 | `/nerve` | Continuous Nerve Center dashboard: ORAC + field + thermal + services (10s refresh). |
+| `/propagate` | Push command table to all service CLAUDE.md files across the Habitat. |
 
 ## Architecture (8 Layers, 40 Modules, 3 Binaries)
 
