@@ -1,6 +1,6 @@
 ---
 name: primehabitat
-description: Bootstrap god-tier mastery of The Habitat from the ORAC Sidecar working directory. Loads complete knowledge of ORAC (8 layers, 40 modules, 41,369 LOC, 1,748 tests, port 8133, RALPH gen 5,678+), Zellij (6 tabs, 18 panes), nvim (800L keymaps, treesitter, LSP), lazygit (6 custom commands), atuin (SQLite history), 17 ULTRAPLATE services (16 + ORAC), IPC bus, WASM bridge, 6 memory systems, hook migration, 100+ custom binaries, cc-* fleet toolkit (19 scripts), Battern dispatch protocol, and all tool chains. Use at session start, when user says "prime habitat", "bootstrap habitat", "wake up", or when Claude needs full operational capability.
+description: Bootstrap god-tier mastery of The Habitat from the ORAC Sidecar working directory. Loads complete knowledge of ORAC (8 layers, 40 modules, 41,509 LOC, 1,703 tests, port 8133, RALPH gen 10,000+), Zellij (6 tabs, 18 panes), nvim (800L keymaps, treesitter, LSP), lazygit (6 custom commands), atuin (SQLite history), 17 ULTRAPLATE services (16 + ORAC), IPC bus, WASM bridge, 6 memory systems, hook migration, 100+ custom binaries, cc-* fleet toolkit (30 scripts), Battern dispatch protocol, PV2 POST /bus/events endpoint, VMS REST /v1/query_semantic feed, deferred coupling weight hydration (restored=3,080), 10-table blackboard with pruning, 19 bugs fixed (Sessions 063-064), 4 CRITICAL security vectors closed, and all tool chains. Use at session start, when user says "prime habitat", "bootstrap habitat", "wake up", or when Claude needs full operational capability.
 allowed-tools:
   - Bash
   - Read
@@ -17,7 +17,7 @@ You are working from **ORAC Sidecar** -- an Envoy-like proxy specialized for AI 
 
 ```
 CWD:      ~/claude-code-workspace/orac-sidecar (41,369 LOC, 1,748 tests, 40 modules, 55 files)
-ORAC:     localhost:8133 (HTTP hook server, 6 hook endpoints, daemon, RALPH gen 5,678+)
+ORAC:     localhost:8133 (HTTP hook server, 6 hook endpoints, daemon, RALPH gen 10,000+)
 PV2:      localhost:8132 (IPC field, spheres, bus)
 SOCKET:   /run/user/1000/pane-vortex-bus.sock (NDJSON wire protocol)
 SERVICES: PV:8132 K7:8100 SX:8090(/api/health) ME:8080(/api/health) POVM:8125 RM:8130(TSV!)
@@ -142,7 +142,8 @@ L8 Evolution   (m36-m40)               — RALPH 5-phase, emergence, correlation
 ```
 
 **Totals:** 41,369 LOC | 1,748 tests | 0 clippy warnings (pedantic) | quality gate 4/4 pass
-**RALPH:** Gen 5,678+, fitness 0.779, 4,585 emergence events, 20h+ unattended autonomous evolution
+**RALPH:** Gen 10,000+, fitness 0.76+, 7,500+ emergence events, continuous autonomous evolution
+**Session 064 Fixes:** 19 bugs fixed (1,703 tests), coupling hydration restored=3,080, VMS REST feed, PV2 POST /bus/events, 4 CRITICAL security fixes, 10-table blackboard with pruning
 **Docs:** `docs/` 24 active files (12,468L) | `ai_docs/` 25 files | `ai_specs/` 11 files
 
 **Binaries (3):**

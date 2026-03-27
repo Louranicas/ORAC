@@ -1,6 +1,6 @@
 ---
 name: deephabitat
-description: Deep substrate mastery for The Habitat from the ORAC Sidecar working directory. Covers ORAC internals (V2 wire protocol state machine, 10 blackboard tables, 6 hook handlers, 4 bridge clients, RALPH 5-phase evolution gen 5,678+, 12D fitness tensor), cross-database architecture (166 DBs, 6 paradigms), ORAC config files (default/dev/prod/hooks/bridges TOML), Zellij plugins, nvim autocmds, devenv batches, 100+ custom binaries (incl 19 cc-* fleet intelligence scripts), Battern dispatch protocol, vault navigation, service topology, and ORAC-specific anti-patterns. Triggers on deep habitat, deep exploration, substrate, wire protocol, cross-db, database architecture, devenv batches, custom binaries, ORAC internals, bridge protocol, evolution chamber, blackboard schema, hook internals, cc toolkit, battern, fleet intelligence, or when Claude needs substrate-level knowledge beyond what primehabitat provides.
+description: Deep substrate mastery for The Habitat from the ORAC Sidecar working directory. Covers ORAC internals (V2 wire protocol state machine, 10 blackboard tables with pruning, 6 hook handlers, 5 bridge clients, RALPH 5-phase evolution gen 10,000+, 12D fitness tensor), cross-database architecture (173 DBs, 6 paradigms), ORAC config files (default/dev/prod/hooks/bridges TOML), HooksConfig for permission policy, deferred coupling weight hydration (restored=3,080), VMS REST /v1/query_semantic feed (660 bytes), PV2 POST /bus/events endpoint, Zellij plugins, nvim autocmds, devenv batches, 100+ custom binaries (incl 30 cc-*/fleet-* scripts), Battern dispatch protocol, vault navigation, service topology, 19 bugs fixed (Sessions 063-064), 4 CRITICAL security fixes (SEC-001 through SEC-004), and ORAC-specific anti-patterns. Triggers on deep habitat, deep exploration, substrate, wire protocol, cross-db, database architecture, devenv batches, custom binaries, ORAC internals, bridge protocol, evolution chamber, blackboard schema, hook internals, cc toolkit, battern, fleet intelligence, or when Claude needs substrate-level knowledge beyond what primehabitat provides.
 allowed-tools:
   - Bash
   - Read
@@ -29,11 +29,11 @@ habitat-probe full                  # Everything
 
 ```
 ORAC:     localhost:8133 | 8 layers, 40 modules, 41,369 LOC, 1,748 tests
-RALPH:    Gen 5,678+, fitness 0.779, 4,585 emergence events, 20h+ unattended
+RALPH:    Gen 10,000+, fitness 0.76+, 7,500+ emergence events, continuous evolution
 PIPE:     /run/user/1000/pane-vortex-bus.sock | NDJSON V2 | 10 ClientFrames, 6 ServerFrames
 WASM:     FIFO /tmp/swarm-commands.pipe → ring /tmp/swarm-events.jsonl (1K cap)
 CONFIG:   config/{default,dev,prod,hooks,bridges}.toml (figment overlay)
-CROSS-DB: 166 DBs, 6 paradigms | See references/databases.md
+CROSS-DB: 173 DBs, 6 paradigms | See references/databases.md
 DEVENV:   5 batches, 18 registered, 16 active + ORAC = 17 | See references/ecosystem.md
 BINARIES: 100+ at ~/.local/bin/ (incl 19 cc-* fleet scripts, fleet-star, orac-{sidecar,probe,client})
 FLEET:    L1 fleet-nav → L2 pane-ctl → L3 fleet-ctl → L4 cc-* toolkit → L5 Battern protocol
@@ -86,7 +86,7 @@ Client                          Server (PV2 bus)
 
 ### Blackboard Schema (m26_blackboard — 919 LOC, rusqlite)
 
-5 tables in SQLite (WAL mode, in-memory for tests):
+10 tables in SQLite (WAL mode, in-memory for tests, with pruning for hebbian_summary/consent_audit):
 
 ```sql
 pane_status      (pane_id PK, status, last_seen, phase, tool_name)
