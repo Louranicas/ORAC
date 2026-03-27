@@ -6,17 +6,53 @@
 
 ---
 
-## Session 062 — ORAC System Atlas + Gap Fill (2026-03-25/26)
+## Session 064 — Bug Hunt + Workflow Architecture (2026-03-27/28)
 
-**Status:** DOCUMENTATION COMPLETE — 24 active docs (12,468L), 5 gap-fill docs, vault renamed, RALPH at gen 5,678.
+**Status:** SYSTEM HARDENED — 20 bugs fixed, 1,703 tests, 11 commits to GitLab, 5 slash commands created.
 
 ### Resume Protocol
 1. Run `/primehabitat` then `/deephabitat`
 2. Read this file
-3. ORAC running on :8133 with RALPH gen=5,678+, fitness=0.779, 17/17 services
-4. All docs at `orac-sidecar/docs/` (24 active files)
-5. Vault renamed: `the-habitat-docs/` (was `maintenance-engine-v2/`)
-6. Session 060 deployment plan STILL PENDING (Ignition Core ~110 LOC)
+3. ORAC running on :8133 with RALPH gen=11,800+, fitness=0.76+, 17/17 services
+4. Use slash commands: `/gate`, `/sweep`, `/deploy-orac`, `/acp`, `/battern`
+5. Coupling hydration: deferred, restored=3,660. VMS feed: REST /v1/query_semantic.
+6. PV2 POST /bus/events: deployed. PV2 decision: NeedsDivergence (unblocked).
+
+### Slash Commands (use these!)
+| Command | Purpose |
+|---------|---------|
+| `/gate` | Quality gate (4 stages, zero tolerance) |
+| `/sweep` | Health sweep (17 services + ORAC + thermal + field) |
+| `/deploy-orac` | Build + deploy cycle (encodes all traps) |
+| `/acp` | Adversarial Convergence Protocol (3 rounds) |
+| `/battern` | Fleet batch dispatch (roles + gates + collect) |
+
+### Session 064 Achievements
+- 20 bugs fixed across ORAC + PV2 + SYNTHEX (11 GitLab commits, ~300 LOC)
+- Coupling weight persistence: restored=3,660 (was 0)
+- VMS→RALPH REST feed live (Gen-063f)
+- PV2 POST /bus/events endpoint deployed
+- 4 CRITICAL security vectors closed (SEC-001 through SEC-004)
+- G1b homeostatic normalization fixed (ceiling 0.85, epsilon 0.01)
+- Token double-counting fixed
+- Zombie session pruning active
+- Table pruning bounded (hebbian_summary 1000, consent_audit 500)
+- Permission policy loaded from hooks.toml config (SEC-001 complete)
+- SYNTHEX synergy silent error fixed (let _ = → if let Err)
+- 7 stale blocked spheres deregistered (PV2 decision unblocked)
+- Baseline metrics captured (150+ measurements)
+- 20 workflows catalogued, 15 tested (all passing)
+- 5 slash commands created
+
+### Next Actions
+- Wire POVM co-activations (~15 LOC in PostToolUse) — substrate learning
+- Fix ME EventBus last mile (bridge silently failing)
+- Stable sphere IDs (longer-term, makes all weights persist naturally)
+
+### Previous Session Reference
+- Session 062: ORAC System Atlas + Gap Fill (24 docs, 12,468L)
+- Session 063: Deep Habitat Exploration (10,726 lines fleet output)
+- Session 060: Habitat Activation Plan (MOST CODE ALREADY IMPLEMENTED)
 
 ### What Was Done
 - **ORAC System Atlas (ACP):** 3 rounds, 29 CC instances, 8 deliverables (D1-D8), 9 fleet reports, 10 verification reports

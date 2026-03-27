@@ -19,6 +19,16 @@ At the start of every new context window:
 2. **Run `/deephabitat`** — loads deep substrate: wire protocol, databases, ecosystem, tools
 3. **Read `CLAUDE.local.md`** — current session state, phase tracking, session history
 
+## Slash Commands (Session 064)
+
+| Command | What It Does |
+|---------|-------------|
+| `/gate` | 4-stage quality gate: check → clippy → pedantic → test. Run before every commit. |
+| `/sweep` | Probe all 17 services + ORAC state + thermal + field coherence. |
+| `/deploy-orac` | Full build → deploy → verify cycle. Encodes all traps (exit 144, cp alias, SIGPIPE). |
+| `/acp` | Adversarial Convergence Protocol: 3 rounds of distributed intelligence with gates. |
+| `/battern` | Patterned fleet batch dispatch: roles → gate → collect → synthesize. |
+
 ## Architecture (8 Layers, 40 Modules, 3 Binaries)
 
 ```
