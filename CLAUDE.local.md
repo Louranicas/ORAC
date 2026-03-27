@@ -26,6 +26,7 @@
 | `/deploy-orac` | Build + deploy cycle (encodes all traps) |
 | `/acp` | Adversarial Convergence Protocol (3 rounds) |
 | `/battern` | Fleet batch dispatch (roles + gates + collect) |
+| `/nerve` | Continuous Nerve Center dashboard (10s refresh) |
 
 ### Session 064 Achievements
 - 20 bugs fixed across ORAC + PV2 + SYNTHEX (11 GitLab commits, ~300 LOC)

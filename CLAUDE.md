@@ -28,6 +28,7 @@ At the start of every new context window:
 | `/deploy-orac` | Full build → deploy → verify cycle. Encodes all traps (exit 144, cp alias, SIGPIPE). |
 | `/acp` | Adversarial Convergence Protocol: 3 rounds of distributed intelligence with gates. |
 | `/battern` | Patterned fleet batch dispatch: roles → gate → collect → synthesize. |
+| `/nerve` | Continuous Nerve Center dashboard: ORAC + field + thermal + services (10s refresh). |
 
 ## Architecture (8 Layers, 40 Modules, 3 Binaries)
 

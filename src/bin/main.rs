@@ -831,7 +831,11 @@ fn persist_stdp_to_povm(
             "pre_id": from,
             "post_id": to,
             "weight": weight,
-            "co_activations": stdp_result.ltp_count,
+            // RALPH Gen 7 fix: Use cumulative co_activations_total from OracState
+            // instead of per-tick ltp_count. Previous code sent the small per-tick
+            // delta which got overwritten on each 60-tick persist cycle, keeping
+            // POVM co_activations near zero. Cumulative total accumulates properly.
+            "co_activations": state.co_activations_total.load(std::sync::atomic::Ordering::Relaxed),
         });
         if raw_http_post(
             "127.0.0.1:8125",
@@ -1620,21 +1624,34 @@ fn spawn_ralph_loop(
                             // Gen-064a: Filter to only save connections where BOTH endpoints
                             // are registered PV2 spheres. Prevents accumulating dead
                             // orac:PID:UUID entries that can never be restored.
+                            // Gen-064b: Save by PERSONA (stable across restarts) instead
+                            // of PaneId (UUID, changes every restart). NAM Ch2: substrate
+                            // independence — relationships must survive re-instantiation.
                             #[cfg(feature = "intelligence")]
                             {
+                                let fs = state.field_state.read();
                                 let sphere_ids: std::collections::HashSet<_> =
-                                    state.field_state.read().spheres.keys().cloned().collect();
+                                    fs.spheres.keys().cloned().collect();
+                                let id_to_persona: std::collections::HashMap<_, _> = fs
+                                    .spheres
+                                    .iter()
+                                    .filter(|(_, s)| !s.persona.is_empty())
+                                    .map(|(id, s)| (id.clone(), s.persona.clone()))
+                                    .collect();
+                                drop(fs);
                                 let net = state.coupling.read();
                                 let saved_weights: Vec<_> = net
                                     .connections
                                     .iter()
                                     .filter(|c| sphere_ids.contains(&c.from) && sphere_ids.contains(&c.to))
-                                    .map(|c| {
-                                        orac_sidecar::m5_bridges::m26_blackboard::SavedCouplingWeight {
-                                            from_id: c.from.as_str().to_owned(),
-                                            to_id: c.to.as_str().to_owned(),
+                                    .filter_map(|c| {
+                                        let from_p = id_to_persona.get(&c.from)?;
+                                        let to_p = id_to_persona.get(&c.to)?;
+                                        Some(orac_sidecar::m5_bridges::m26_blackboard::SavedCouplingWeight {
+                                            from_id: from_p.clone(),
+                                            to_id: to_p.clone(),
                                             weight: c.weight,
-                                        }
+                                        })
                                     })
                                     .collect();
                                 drop(net);
