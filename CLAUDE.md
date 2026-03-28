@@ -11,13 +11,16 @@
 
 ---
 
-## Bootstrap Protocol
+## Habitat Bootstrap (New Context Window)
 
-At the start of every new context window:
+Run these 4 commands at the start of every new context window:
 
-1. **Run `/primehabitat`** — loads The Habitat: Zellij tabs, 17 services, IPC bus, memory systems
-2. **Run `/deephabitat`** — loads deep substrate: wire protocol, databases, ecosystem, tools
-3. **Read `CLAUDE.local.md`** — current session state, phase tracking, session history
+1. **`/zellij-mastery`** — Zellij config, layouts, plugins, dispatch stack, keybinds
+2. **`/primehabitat`** — The Habitat: 17 services, IPC bus, memory systems, fleet
+3. **`/deephabitat`** — deep substrate: wire protocol, databases, ecosystem, tools
+4. **`/sweep`** — probes all 17 services + ORAC + thermal + field coherence
+
+Then read `CLAUDE.local.md` for current session state and phase tracking.
 
 ## Slash Commands (Session 064)
 

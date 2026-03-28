@@ -1,7 +1,7 @@
 # ORAC Sidecar — Local Development Context
 
 ```json
-{"v":"0.11.0","status":"EVOLUTION_ACTIVE","phase":"documentation-complete","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":4,"tests":1748,"loc":41369,"files":55,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_persisted":true,"ralph_gen":5678,"ralph_fitness":0.779,"ralph_phase":"Learn","synthex_wired":true,"synthex_temp":0.622,"vms_wired":true,"povm_persist_wired":true,"povm_format_fixed":true,"me_eventbus_confirmed_working":true,"me_observer_subscribed":true,"bridge_urls_fixed":true,"field_poller":true,"coupling_pruning":true,"ipc_client":true,"ipc_connected":true,"ipc_state":"subscribed","orac_client":true,"circuit_breaker_wired":true,"semantic_router_wired":true,"blackboard_wired":true,"blackboard_tables":10,"session_persistence":true,"token_accounting_wired":true,"consent_endpoints":true,"ghost_tracking":true,"chimera_detection":true,"correlation_wired":true,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_total":22,"orac_state_fields":32,"busframe_variants":11,"bugs_fixed_session060":8,"bugs_discovered_fleet":45,"docs_active":24,"docs_active_lines":12468,"docs_archived":9,"docs_archived_lines":4023,"gap_fill_docs":5,"gap_fill_lines":3193,"cc_instances_session062":40,"acp_rounds":5,"gap_analysis":{"GAP_A":"FIXED_session058","GAP_B":"FIXED_session058","GAP_C":"FIXED_session060","GAP_D":"NOT_A_BUG","GAP_E":"WORKING","GAP_F":"LOW_PRIORITY"},"coupling_connections":1406,"coupling_weight_mean":0.1796,"field_r":0.0,"sphere_count":0,"emergence_events":4585,"emergence_monitors":50,"ltp_total":3182,"ltd_total":60875,"ltp_ltd_ratio":0.0523,"vault_renamed":"maintenance-engine-v2 → the-habitat-docs","vault_files":121,"vault_links":109,"vault_broken_links":0,"obsidian_notes_created":32,"star_tracker_entries":19,"session":"062","next_actions":["deploy_session060_ignition_core","git_commit_push_session062","wire_DispatchLoop_detector","fix_prometheus_crash","profile_stdp_at_200_spheres"]}
+{"v":"0.12.0","status":"FEEDBACK_LOOPS_LIVE","phase":"evolution-wired","port":8133,"plan":"ORAC_PLAN.md","mindmap":"ORAC_MINDMAP.md","plan_toml":"plan.toml","scaffold_modules":40,"layers":8,"bin_targets":4,"tests":1711,"loc":41714,"files":55,"clippy":0,"modules_implemented":40,"modules_stub":0,"hooks_migrated":true,"ralph_live":true,"ralph_persisted":true,"ralph_gen":12878,"ralph_fitness":0.802,"ralph_phase":"Harvest","ralph_feedback_loops":3,"ralph_hint_sources":["emergence","dimension","pathway"],"select_with_hint":true,"learned_hint_field":true,"synthex_wired":true,"synthex_temp":0.538,"vms_wired":true,"povm_persist_wired":true,"povm_format_fixed":true,"me_eventbus_confirmed_working":true,"me_observer_subscribed":true,"bridge_urls_fixed":true,"field_poller":true,"coupling_pruning":true,"ipc_client":true,"ipc_connected":true,"ipc_state":"subscribed","orac_client":true,"circuit_breaker_wired":true,"semantic_router_wired":true,"blackboard_wired":true,"blackboard_tables":10,"session_persistence":true,"token_accounting_wired":true,"consent_endpoints":true,"ghost_tracking":true,"chimera_detection":true,"correlation_wired":true,"correlation_feedback_wired":true,"default_features":"api,persistence,bridges,intelligence,monitoring,evolution","endpoints_total":22,"orac_state_fields":33,"busframe_variants":11,"bugs_fixed_session060":8,"bugs_discovered_fleet":45,"docs_active":24,"docs_active_lines":12468,"docs_archived":9,"docs_archived_lines":4023,"gap_fill_docs":5,"gap_fill_lines":3193,"cc_instances_session062":40,"acp_rounds":5,"gap_analysis":{"GAP_A":"FIXED_session058","GAP_B":"FIXED_session058","GAP_C":"FIXED_session060","GAP_D":"NOT_A_BUG","GAP_E":"WORKING","GAP_F":"LOW_PRIORITY"},"coupling_connections":6320,"coupling_weight_mean":0.179,"field_r":0.857,"sphere_count":80,"emergence_events":36,"emergence_monitors":17,"ltp_total":70,"ltd_total":0,"ltp_idle_gating":"G1_G2_G3_active","vault_renamed":"maintenance-engine-v2 → the-habitat-docs","vault_files":121,"vault_links":109,"vault_broken_links":0,"obsidian_notes_created":33,"star_tracker_entries":19,"session":"065","session_065_changes":["select_with_hint_m40","learned_hint_m36","learn_phase_3source_rewrite","emergence_parameter_mapping","dimension_parameter_mapping","pathway_extraction","8_new_tests"],"next_actions":["monitor_hint_guided_mutations","wire_DispatchLoop_ConsentCascade_detectors","fix_prometheus_crash","git_commit_push_session065"]}
 ```
 
 ---
@@ -10,13 +10,22 @@
 
 **Status:** SYSTEM HARDENED — 20 bugs fixed, 1,703 tests, 11 commits to GitLab, 5 slash commands created.
 
-### Resume Protocol
-1. Run `/primehabitat` then `/deephabitat`
-2. Read this file
-3. ORAC running on :8133 with RALPH gen=11,800+, fitness=0.76+, 17/17 services
-4. Use slash commands: `/gate`, `/sweep`, `/deploy-orac`, `/acp`, `/battern`
-5. Coupling hydration: deferred, restored=3,660. VMS feed: REST /v1/query_semantic.
-6. PV2 POST /bus/events: deployed. PV2 decision: NeedsDivergence (unblocked).
+### Habitat Bootstrap (New Context Window)
+
+Run these 4 commands at the start of every new context window:
+
+1. `/zellij-mastery` — Zellij config, layouts, plugins, dispatch stack, keybinds
+2. `/primehabitat` — The Habitat: 17 services, IPC bus, memory systems, fleet
+3. `/deephabitat` — deep substrate: wire protocol, databases, ecosystem, tools
+4. `/sweep` — probes all 17 services + ORAC + thermal + field coherence
+
+Then read this file for ORAC-specific session context.
+
+### Resume State
+- ORAC running on :8133 with RALPH gen=12,100+, fitness=0.78+, 17/17 services
+- Use slash commands: `/gate`, `/sweep`, `/deploy-orac`, `/acp`, `/battern`
+- Coupling hydration: deferred, restored=3,660. VMS feed: REST /v1/query_semantic.
+- PV2 POST /bus/events: deployed. PV2 decision: NeedsDivergence (unblocked).
 
 ### Slash Commands (use these!)
 | Command | Purpose |

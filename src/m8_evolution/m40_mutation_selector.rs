@@ -367,6 +367,23 @@ impl MutationSelector {
     /// or [`RejectionReason::AllBlocked`] if all off-target candidates are blocked
     /// by cooldown or diversity enforcement.
     pub fn select(&self, generation: u64) -> Result<MutationProposal, RejectionReason> {
+        self.select_with_hint(generation, None)
+    }
+
+    /// Select a parameter with an optional hint from the Learn phase.
+    ///
+    /// When `hint` names a registered parameter that is off-target and passes
+    /// cooldown + diversity gates, it is selected instead of the round-robin
+    /// candidate. All BUG-035 diversity enforcement still applies — hints
+    /// are suggestions, not overrides.
+    ///
+    /// # Errors
+    /// Same as [`select`].
+    pub fn select_with_hint(
+        &self,
+        generation: u64,
+        hint: Option<&str>,
+    ) -> Result<MutationProposal, RejectionReason> {
         self.stats.write().total_attempts += 1;
 
         let params = self.parameters.read();
@@ -377,6 +394,33 @@ impl MutationSelector {
 
         let param_count = params.len();
         let idx = *self.round_robin_idx.read();
+
+        // Hint-first selection: if the Learn phase identified a parameter
+        // correlated with beneficial outcomes (via pathways, emergence, or
+        // dimension analysis), try it before the round-robin cycle.
+        // All diversity gates still apply — hints are guidance, not overrides.
+        if let Some(hint_name) = hint {
+            if let Some(candidate) = params.iter().find(|p| p.name == hint_name) {
+                if !candidate.is_on_target()
+                    && self.check_cooldown(hint_name, generation).is_none()
+                    && self.check_diversity(hint_name).is_none()
+                {
+                    let proposal = self.create_proposal(candidate, generation);
+                    let reason_prefix = proposal.reason.clone();
+                    let proposal = MutationProposal {
+                        reason: format!("{reason_prefix} [hint-guided]"),
+                        ..proposal
+                    };
+                    drop(params);
+                    self.record_selection(&proposal.parameter, generation);
+                    // Don't advance round-robin — hint doesn't consume the rotation
+                    let mut stats = self.stats.write();
+                    stats.total_selections += 1;
+                    *stats.per_parameter.entry(proposal.parameter.clone()).or_insert(0) += 1;
+                    return Ok(proposal);
+                }
+            }
+        }
 
         // Track whether any candidate was skipped due to cooldown/diversity
         // (as opposed to being on-target) so we can distinguish the rejection reason.
@@ -1099,5 +1143,82 @@ mod tests {
 
         let hist = sel.selection_history.read();
         assert!(hist.len() <= 5);
+    }
+
+    // ── select_with_hint tests ──
+
+    #[test]
+    fn hint_selects_named_parameter() {
+        let sel = make_selector();
+        register_test_params(&sel);
+
+        // Without hint: round-robin picks first param (k_mod)
+        let no_hint = sel.select_with_hint(1, None).unwrap();
+        assert_eq!(no_hint.parameter, "k_mod");
+
+        // With hint for a later param: skips round-robin to hebbian_ltp
+        let with_hint = sel.select_with_hint(20, Some("hebbian_ltp")).unwrap();
+        assert_eq!(with_hint.parameter, "hebbian_ltp");
+        assert!(with_hint.reason.contains("[hint-guided]"));
+    }
+
+    #[test]
+    fn hint_falls_through_on_cooldown() {
+        let sel = MutationSelector::with_config(MutationSelectorConfig {
+            cooldown_generations: 5,
+            ..Default::default()
+        });
+        register_test_params(&sel);
+
+        // Select hebbian_ltp at gen 1 to put it on cooldown
+        let _ = sel.select_with_hint(1, Some("hebbian_ltp"));
+
+        // Hint hebbian_ltp at gen 2 — should be on cooldown, fall through
+        let result = sel.select_with_hint(2, Some("hebbian_ltp")).unwrap();
+        // Should get a different parameter via round-robin fallback
+        assert_ne!(result.parameter, "hebbian_ltp");
+        assert!(!result.reason.contains("[hint-guided]"));
+    }
+
+    #[test]
+    fn hint_falls_through_on_unknown_param() {
+        let sel = make_selector();
+        register_test_params(&sel);
+
+        // Hint a nonexistent parameter
+        let result = sel.select_with_hint(1, Some("nonexistent")).unwrap();
+        // Should fall through to round-robin
+        assert!(!result.reason.contains("[hint-guided]"));
+    }
+
+    #[test]
+    fn hint_falls_through_when_on_target() {
+        let sel = make_selector();
+        // Register a param already at target
+        sel.register_parameter(MutableParameter::new(
+            "at_target", 0.5, 0.0, 1.0, 0.5, "Already there",
+        )).unwrap();
+        sel.register_parameter(MutableParameter::new(
+            "off_target", 1.0, 0.0, 2.0, 0.5, "Needs mutation",
+        )).unwrap();
+
+        // Hint the on-target param — should skip it
+        let result = sel.select_with_hint(1, Some("at_target")).unwrap();
+        assert_eq!(result.parameter, "off_target");
+        assert!(!result.reason.contains("[hint-guided]"));
+    }
+
+    #[test]
+    fn hint_does_not_advance_round_robin() {
+        let sel = make_selector();
+        register_test_params(&sel);
+
+        // Use hint for hebbian_ltp at gen 1
+        let _ = sel.select_with_hint(1, Some("hebbian_ltp"));
+
+        // Next call without hint should start from round-robin position 0
+        // (hint didn't advance the rotation)
+        let next = sel.select(20).unwrap();
+        assert_eq!(next.parameter, "k_mod");
     }
 }
