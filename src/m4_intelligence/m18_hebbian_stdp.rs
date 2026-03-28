@@ -104,7 +104,15 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
 
                 ltp
             } else if either_working {
-                // LTD: one active, one idle — active depression
+                // G3 idle-gating: skip LTD when the non-working endpoint
+                // has zero memories and zero recent activity. Prevents 66+
+                // idle orac-agent spheres from generating parasitic LTD that
+                // overwhelms all LTP (Session 066 fix: LTD/LTP was 25:1).
+                let idle_sphere = if from_working { to_sphere } else { from_sphere };
+                if idle_sphere.memories.is_empty() && idle_sphere.activity_30s == 0 {
+                    return None;
+                }
+                // LTD: one active, one idle (with meaningful state) — active depression
                 -m04_constants::HEBBIAN_LTD
             } else {
                 // G2 idle-idle skip: both endpoints idle — no STDP update.
@@ -200,6 +208,7 @@ pub fn are_coactive(sphere_a: &PaneSphere, sphere_b: &PaneSphere) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::m1_core::m01_core_types::SphereMemory;
     use approx::assert_relative_eq;
 
     fn pid(s: &str) -> PaneId {
@@ -213,7 +222,16 @@ mod tests {
     }
 
     fn idle_sphere(id: &str) -> PaneSphere {
-        PaneSphere::new(pid(id), "test")
+        // G3 idle gating: give idle spheres a memory so they are NOT
+        // gated (empty+inactive spheres skip LTD since Session 066).
+        let mut s = PaneSphere::new(pid(id), "test");
+        s.memories.push(SphereMemory::new(
+            0,
+            crate::m1_core::m01_core_types::Point3D { x: 0.0, y: 0.0, z: 0.0 },
+            "test".into(),
+            "test".into(),
+        ));
+        s
     }
 
     fn setup_two_working() -> (CouplingNetwork, HashMap<PaneId, PaneSphere>) {

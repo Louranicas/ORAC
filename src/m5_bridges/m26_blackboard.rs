@@ -251,6 +251,20 @@ impl Blackboard {
         Ok(bb)
     }
 
+    /// Execute a parameterised SQL statement against the blackboard.
+    ///
+    /// Used by POVM hydration to inject context records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on `SQLite` failure.
+    pub fn execute_sql(&self, sql: &str, params: &[&str]) -> PvResult<usize> {
+        let p: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        self.conn
+            .execute(sql, p.as_slice())
+            .map_err(|e| PvError::Database(format!("execute_sql: {e}")))
+    }
+
     /// Run schema migrations.
     #[allow(clippy::too_many_lines)] // 10-table schema migration in a single execute_batch
     fn migrate(&self) -> PvResult<()> {
@@ -368,6 +382,17 @@ impl Blackboard {
                     updated_at  REAL NOT NULL DEFAULT 0.0,
                     PRIMARY KEY (from_id, to_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS povm_context (
+                    memory_id       TEXT PRIMARY KEY,
+                    content_summary TEXT NOT NULL DEFAULT '',
+                    intensity       REAL NOT NULL DEFAULT 0.0,
+                    crystallised    INTEGER NOT NULL DEFAULT 0,
+                    injected_tick   INTEGER NOT NULL DEFAULT 0,
+                    injected_at     REAL NOT NULL DEFAULT 0.0
+                );
+                CREATE INDEX IF NOT EXISTS idx_povm_context_intensity
+                    ON povm_context(intensity DESC);
                 ",
             )
             .map_err(|e| PvError::Database(format!("migrate: {e}")))?;

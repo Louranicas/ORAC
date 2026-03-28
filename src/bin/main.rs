@@ -964,6 +964,74 @@ fn trigger_vms_consolidation(state: &OracState, tick: u64) {
     }
 }
 
+/// Hydrate top POVM memories into blackboard `povm_context` table (Session 066).
+///
+/// Every 60 ticks (~300s), fetches memories from POVM sorted by intensity,
+/// then upserts the top 10 into the blackboard for tick-loop access.
+/// ACP-F5: Runs in async context alongside bridge polling, NOT in `tick_once()`.
+#[cfg(all(feature = "persistence", feature = "bridges"))]
+fn hydrate_povm_to_blackboard(state: &OracState, tick: u64) {
+    use orac_sidecar::m5_bridges::http_helpers::raw_http_get;
+
+    let resp = match raw_http_get("127.0.0.1:8125", "/memories?limit=20", "povm") {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::debug!("POVM hydration fetch failed: {e}");
+            return;
+        }
+    };
+    let memories: Vec<serde_json::Value> = match serde_json::from_str(&resp) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::debug!("POVM hydration parse failed: {e}");
+            return;
+        }
+    };
+
+    let Some(bb) = state.blackboard() else {
+        return;
+    };
+
+    // Sort by intensity descending and take top 10
+    let mut sorted = memories;
+    sorted.sort_by(|a, b| {
+        let ia = a.get("intensity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let ib = b.get("intensity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sorted.truncate(10);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+
+    let mut injected = 0u32;
+    for mem in &sorted {
+        let id = mem.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
+        let content = mem.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+        let intensity = mem.get("intensity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let crystallised = mem.get("crystallised").and_then(serde_json::Value::as_bool).unwrap_or(false);
+
+        if id.is_empty() {
+            continue;
+        }
+
+        // Truncate content to 200 chars for summary
+        let summary: String = content.chars().take(200).collect();
+
+        let sql = "INSERT OR REPLACE INTO povm_context \
+                   (memory_id, content_summary, intensity, crystallised, injected_tick, injected_at) \
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        if bb.execute_sql(sql, &[id, &summary, &intensity.to_string(), &(i32::from(crystallised)).to_string(), &tick.to_string(), &now.to_string()]).is_ok() {
+            injected += 1;
+        }
+    }
+
+    if injected > 0 {
+        tracing::info!(injected, tick, "POVM memories hydrated into blackboard");
+    }
+}
+
 /// Query VMS for semantic memories relevant to current field state (IGNITION-1d).
 ///
 /// During RALPH Recognize phase, asks VMS for the 5 most relevant memories to
@@ -1556,6 +1624,16 @@ fn spawn_ralph_loop(
                         && tick % 30 == 0
                     {
                         query_vms_for_ralph_context(&state, tick);
+                    }
+
+                    // SESSION-066: Periodic POVM hydration into blackboard.
+                    // Every 60 ticks (~300s), fetch top memories from POVM and
+                    // inject into povm_context table for tick-loop access.
+                    // ACP-F5 fix: runs in async context (not tick_once) to
+                    // avoid blocking the synchronous tick function.
+                    #[cfg(all(feature = "persistence", feature = "bridges"))]
+                    if tick % 60 == 0 && tick > 0 {
+                        hydrate_povm_to_blackboard(&state, tick);
                     }
 
                     let tensor = build_tensor_from_state(&state);

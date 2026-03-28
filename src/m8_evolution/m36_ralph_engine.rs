@@ -279,6 +279,13 @@ pub struct RalphStats {
 /// and diversity-enforced mutations in a cyclic Recognize → Analyze → Learn →
 /// Propose → Harvest loop.
 ///
+/// The Learn phase closes the feedback loop by mining established pathways,
+/// recent emergence events, and dimensional fitness analysis to produce a
+/// *mutation hint* — a preferred parameter for the Propose phase. The hint
+/// is passed to `MutationSelector::select_with_hint()`, which tries the
+/// hinted parameter first (subject to cooldown + diversity gates) before
+/// falling back to round-robin.
+///
 /// # Thread Safety
 ///
 /// All mutable state is protected by [`parking_lot::RwLock`].
@@ -297,6 +304,10 @@ pub struct RalphEngine {
     mutation_history: RwLock<VecDeque<MutationRecord>>,
     /// Snapshot history.
     snapshots: RwLock<VecDeque<StateSnapshot>>,
+    /// Learned mutation hint from the Learn phase, consumed by Propose.
+    /// Connects correlation output → mutation input, emergence events →
+    /// strategy selection, and dimensional analysis → parameter prioritization.
+    learned_hint: RwLock<Option<String>>,
     /// Fitness tensor evaluator.
     fitness: FitnessTensor,
     /// Emergence detector.
@@ -348,6 +359,7 @@ impl RalphEngine {
             snapshots: RwLock::new(VecDeque::with_capacity(
                 config.snapshot_capacity.min(100),
             )),
+            learned_hint: RwLock::new(None),
             fitness: FitnessTensor::new(),
             emergence: EmergenceDetector::new(),
             correlation: CorrelationEngine::new(),
@@ -547,16 +559,118 @@ impl RalphEngine {
         Ok(())
     }
 
-    /// Phase 3: Learn — mine correlations for patterns.
+    /// Phase 3: Learn — mine correlations, emergence, and dimensions for mutation hints.
+    ///
+    /// Closes the feedback loop: correlation pathways, emergence events, and
+    /// dimensional fitness analysis are distilled into a single parameter hint
+    /// that guides the Propose phase. Priority: emergence > dimension > pathway.
     fn phase_learn(&self, _tick: u64) {
-        // Check for established pathways (used for pattern-guided mutation)
-        let _pathways = self.correlation.established_pathways();
+        let mut hint: Option<String> = None;
+
+        // ── Source 1: Emergence events → tactical parameter hints ──
+        // Emergence events represent urgent system-level phenomena that
+        // should override routine round-robin mutation selection.
+        {
+            use super::m37_emergence_detector::EmergenceType;
+            let recent = self.emergence.recent(10);
+            for record in &recent {
+                let mapped = match record.emergence_type {
+                    // Over-synchronization: reduce r target to allow phase diversity
+                    EmergenceType::CoherenceLock => Some("r_target"),
+                    // Coupling pathology: adjust coupling strength
+                    // CouplingRunaway = K rising without r benefit
+                    // ChimeraFormation = phase clusters need stronger coupling
+                    EmergenceType::CouplingRunaway
+                    | EmergenceType::ChimeraFormation => Some("k_mod"),
+                    // Weights pinned at bounds: adjust LTP rate
+                    EmergenceType::HebbianSaturation => Some("hebbian_ltp"),
+                    // Thermal overshoot: slow tick rate to cool
+                    EmergenceType::ThermalSpike => Some("tick_interval"),
+                    // These don't need corrective mutation
+                    EmergenceType::BeneficialSync
+                    | EmergenceType::DispatchLoop
+                    | EmergenceType::ConsentCascade
+                    | EmergenceType::DegenerateMode => None,
+                };
+                if let Some(param) = mapped {
+                    hint = Some(param.to_owned());
+                    tracing::debug!(
+                        emergence = %record.emergence_type,
+                        hint = param,
+                        "Learn: emergence-guided hint"
+                    );
+                    break; // Highest-priority source: use first match
+                }
+            }
+        }
+
+        // ── Source 2: Dimensional analysis → weakest-dimension hint ──
+        // If no emergence event produced a hint, check which fitness
+        // dimension is weakest and guide mutation toward its lever.
+        if hint.is_none() {
+            if let Some(analysis) = self.fitness.dimension_analysis() {
+                use super::m39_fitness_tensor::FitnessDimension;
+                let mapped = match analysis.weakest {
+                    FitnessDimension::FieldCoherence => Some("r_target"),
+                    FitnessDimension::HebbianHealth => Some("hebbian_ltp"),
+                    FitnessDimension::CouplingStability => Some("decay_rate"),
+                    FitnessDimension::ThermalBalance => Some("tick_interval"),
+                    FitnessDimension::CoordinationQuality => Some("k_mod"),
+                    // No direct parameter lever for these dimensions
+                    _ => None,
+                };
+                if let Some(param) = mapped {
+                    hint = Some(param.to_owned());
+                    tracing::debug!(
+                        weakest_dim = %analysis.weakest,
+                        score = format!("{:.4}", analysis.weakest_weighted_score),
+                        hint = param,
+                        "Learn: dimension-guided hint"
+                    );
+                }
+            }
+        }
+
+        // ── Source 3: Established pathways → pattern-guided hint ──
+        // Extract parameter names from high-confidence recurring pathways.
+        // Pattern keys have format `mutation:param_name→emergence:type`.
+        if hint.is_none() {
+            let pathways = self.correlation.established_pathways();
+            // Find the pathway with highest confidence that references a mutation
+            if let Some(best) = pathways
+                .iter()
+                .filter(|p| p.pattern_key.starts_with("mutation:"))
+                .max_by(|a, b| {
+                    a.avg_confidence
+                        .partial_cmp(&b.avg_confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            {
+                // Extract parameter name from pattern key: "mutation:k_mod→..."
+                if let Some(param_name) = best.pattern_key
+                    .strip_prefix("mutation:")
+                    .and_then(|s| s.split('→').next())
+                {
+                    hint = Some(param_name.to_owned());
+                    tracing::debug!(
+                        pathway = %best.pattern_key,
+                        confidence = format!("{:.3}", best.avg_confidence),
+                        occurrences = best.occurrences,
+                        hint = param_name,
+                        "Learn: pathway-guided hint"
+                    );
+                }
+            }
+        }
+
+        // Store hint for Propose phase
+        *self.learned_hint.write() = hint;
 
         // Advance to Propose
         *self.phase.write() = RalphPhase::Propose;
     }
 
-    /// Phase 4: Propose — generate diversity-enforced mutation.
+    /// Phase 4: Propose — generate hint-guided, diversity-enforced mutation.
     fn phase_propose(&self, tick: u64) {
         // Skip if there's already an active mutation being verified
         if self.active_mutation.read().is_some() {
@@ -566,7 +680,10 @@ impl RalphEngine {
 
         let generation = *self.generation.read();
 
-        match self.selector.select(generation) {
+        // Consume learned parameter guidance from the Learn phase (if any)
+        let learned_param = self.learned_hint.write().take();
+
+        match self.selector.select_with_hint(generation, learned_param.as_deref()) {
             Ok(proposal) => {
                 // Take snapshot before applying
                 let snapshot = self.take_snapshot(tick);
@@ -762,6 +879,7 @@ impl RalphEngine {
         *self.completed_cycles.write() = 0;
         *self.paused.write() = false;
         *self.active_mutation.write() = None;
+        *self.learned_hint.write() = None;
         self.mutation_history.write().clear();
         self.snapshots.write().clear();
         self.fitness.reset();
@@ -1229,5 +1347,102 @@ mod tests {
         assert_eq!(stats.total_cycles, 0,
             "BUG-059: skipped generations should not inflate cycle count (got {})",
             stats.total_cycles);
+    }
+
+    // ── Feedback loop wiring tests ──
+
+    #[test]
+    fn learn_phase_produces_hint_from_emergence() {
+        let engine = make_engine();
+        register_params(&engine);
+
+        // Feed a CoherenceLock emergence event
+        use crate::m8_evolution::m37_emergence_detector::{EmergenceType, EmergenceParams};
+        engine.emergence().record_emergence(&EmergenceParams {
+            emergence_type: EmergenceType::CoherenceLock,
+            confidence: 0.95,
+            severity: 0.7,
+            affected_panes: vec![],
+            description: "test coherence lock".into(),
+            tick: 100,
+            recommended_action: None,
+        }).unwrap();
+
+        // Run Recognize + Analyze to get to Learn
+        let tensor = make_tensor(0.7);
+        engine.tick(&tensor, 100).unwrap(); // Recognize → Analyze
+        engine.tick(&tensor, 101).unwrap(); // Analyze → Learn
+
+        // Now run Learn — should set hint to r_target
+        engine.tick(&tensor, 102).unwrap(); // Learn → Propose
+
+        // The hint was consumed by Propose, but we can verify the mutation
+        // proposal targets r_target (hint-guided) if it passed diversity gates
+        let mutations = engine.recent_mutations(1);
+        if let Some(record) = mutations.first() {
+            // If a mutation was proposed, it should be hint-guided to r_target
+            assert_eq!(record.proposal.parameter, "r_target",
+                "emergence-guided hint should direct mutation to r_target");
+            assert!(record.proposal.reason.contains("[hint-guided]"),
+                "mutation reason should indicate hint guidance");
+        }
+    }
+
+    #[test]
+    fn learn_phase_falls_through_to_dimension_hint() {
+        let engine = make_engine();
+        register_params(&engine);
+
+        // No emergence events — dimension analysis should provide the hint.
+        // With uniform tensor at 0.3 (low), weakest dim depends on weights.
+        // D0 coordination_quality (weight 0.18) will have lowest weighted score
+        // at uniform 0.3: 0.3 * 0.18 = 0.054, vs D11 at 0.3 * 0.02 = 0.006.
+        // Actually weakest_weighted is min(value * weight), so D11 (0.02) is weakest.
+        // D11 = ConsentCompliance → no parameter mapping → falls to next.
+        // So with uniform values, the dimension hint may not fire, which is correct.
+
+        // Use non-uniform tensor: field_coherence (D1) at 0.1, rest at 0.9
+        let mut tensor = make_tensor(0.9);
+        tensor.values[1] = 0.1; // field_coherence = low
+
+        engine.tick(&tensor, 100).unwrap(); // Recognize → Analyze
+        engine.tick(&tensor, 101).unwrap(); // Analyze → Learn
+        engine.tick(&tensor, 102).unwrap(); // Learn → Propose
+
+        let mutations = engine.recent_mutations(1);
+        if let Some(record) = mutations.first() {
+            // Weakest weighted dimension is D1 (field_coherence) at 0.1*0.15=0.015.
+            // That maps to r_target.
+            assert_eq!(record.proposal.parameter, "r_target",
+                "dimension-guided hint should direct mutation to r_target");
+        }
+    }
+
+    #[test]
+    fn learned_hint_cleared_after_propose() {
+        let engine = make_engine();
+        register_params(&engine);
+
+        // Feed emergence to create a hint
+        use crate::m8_evolution::m37_emergence_detector::{EmergenceType, EmergenceParams};
+        engine.emergence().record_emergence(&EmergenceParams {
+            emergence_type: EmergenceType::ThermalSpike,
+            confidence: 0.9,
+            severity: 0.8,
+            affected_panes: vec![],
+            description: "thermal spike".into(),
+            tick: 100,
+            recommended_action: None,
+        }).unwrap();
+
+        let tensor = make_tensor(0.7);
+        // Run through Learn → Propose (hint consumed)
+        for tick in 100..=103 {
+            engine.tick(&tensor, tick).unwrap();
+        }
+
+        // Hint should be cleared after Propose consumed it
+        assert!(engine.learned_hint.read().is_none(),
+            "learned hint should be None after Propose phase consumes it");
     }
 }

@@ -46,8 +46,11 @@ const MAX_MONITORS: usize = 50;
 
 /// Default coherence lock threshold (r value).
 /// Gen-059g: Lowered from 0.998 to 0.92 — field r peaks at 0.92 naturally.
-/// 0.998 was unreachable with Kuramoto oscillator noise.
-const DEFAULT_COHERENCE_LOCK_R: f64 = 0.92;
+/// Gen-064b: Raised from 0.92 to 0.95 — reduces false positives from normal
+/// Kuramoto fluctuations while still detecting genuine coherence locks.
+/// Session-066: Raised from 0.95 to 0.98 — 70% of emergence events were
+/// `coherence_lock` noise at 0.95. At 0.98, only genuine locks fire.
+const DEFAULT_COHERENCE_LOCK_R: f64 = 0.98;
 
 /// Default coherence lock duration (ticks).
 const DEFAULT_COHERENCE_LOCK_TICKS: u64 = 10;
@@ -103,6 +106,9 @@ pub enum EmergenceType {
     BeneficialSync,
     /// Multiple spheres opt out of coupling within short window.
     ConsentCascade,
+    /// 4+ intelligence subsystems show stagnation (Session 066).
+    /// Uses only internal state — no HTTP calls in tick loop (ACP-F6).
+    DegenerateMode,
 }
 
 impl fmt::Display for EmergenceType {
@@ -116,6 +122,7 @@ impl fmt::Display for EmergenceType {
             Self::ThermalSpike => f.write_str("thermal_spike"),
             Self::BeneficialSync => f.write_str("beneficial_sync"),
             Self::ConsentCascade => f.write_str("consent_cascade"),
+            Self::DegenerateMode => f.write_str("degenerate_mode"),
         }
     }
 }
@@ -267,10 +274,28 @@ pub struct EmergenceStats {
     pub total_expired: u64,
 }
 
+/// Snapshot of internal state for degenerate mode detection (Session 066).
+///
+/// All fields are read from cached/atomic state — no HTTP calls needed (ACP-F6).
+#[derive(Clone, Debug)]
+pub struct DegenerateSnapshot {
+    /// Cumulative LTP count from Hebbian STDP.
+    pub ltp_total: u64,
+    /// Cumulative LTD count from Hebbian STDP.
+    pub ltd_total: u64,
+    /// Mean coupling weight across all connections.
+    pub weight_mean: f64,
+    /// Recent r (order parameter) history.
+    pub r_history: Vec<f64>,
+    /// Current decision engine action (e.g. "Stable", "`HasBlockedAgents`").
+    pub decision_action: String,
+    /// Tick at which the decision action last changed.
+    pub last_decision_change_tick: u64,
+}
+
 /// Parameters for recording an emergence detection.
 ///
 /// Used to avoid excessive function argument counts in [`EmergenceDetector::record_emergence`].
-#[derive(Clone, Debug)]
 pub struct EmergenceParams {
     /// Classification of the detected emergence.
     pub emergence_type: EmergenceType,
@@ -602,9 +627,14 @@ impl EmergenceDetector {
             return Ok(None);
         }
 
+        // Tier-S fix (Session 065): Asymmetric saturation check.
+        // Weights at floor indicate learning collapse (LTD dominance).
+        // Weights at ceiling indicate learned pathways (healthy).
+        // Use wider floor margin (floor + 0.02) to catch near-floor decay,
+        // narrow ceiling margin (0.01) for genuine saturation only.
         let saturated = weights
             .iter()
-            .filter(|&&w| (w - floor).abs() < 0.01 || (w - ceiling).abs() < 0.01)
+            .filter(|&&w| w < floor + 0.02 || (w - ceiling).abs() < 0.01)
             .count();
 
         #[allow(clippy::cast_precision_loss)] // counts bounded by weight array size
@@ -737,6 +767,127 @@ impl EmergenceDetector {
             tick,
             recommended_action: None,
         })
+    }
+
+    /// Detect degenerate mode — intelligence subsystems showing stagnation.
+    ///
+    /// Session 066: Uses ONLY internal state (ACP-F6 — no HTTP calls in tick).
+    /// Checks 6 indicators from cached/atomic state. Fires when 4+ show stagnation.
+    ///
+    /// # Indicators (all from internal state)
+    /// 1. LTP/LTD ratio near zero (coupling not learning)
+    /// 2. Decision action unchanged for 50+ ticks
+    /// 3. Coupling weight mean stuck near floor
+    /// 4. Emergence events dominated (>80%) by single type
+    /// 5. r locked near 1.0 for 30+ ticks (no exploration)
+    /// 6. Zero emergence events in last 100 ticks
+    ///
+    /// # Errors
+    /// Returns [`PvError`] if recording fails.
+    /// Detect degenerate mode from a snapshot of internal system state.
+    ///
+    /// Session 066: Uses ONLY internal state (ACP-F6 — no HTTP calls in tick).
+    ///
+    /// # Errors
+    /// Returns [`PvError`] if recording fails.
+    #[allow(clippy::too_many_lines)]
+    pub fn detect_degenerate_mode(
+        &self,
+        snapshot: &DegenerateSnapshot,
+        tick: u64,
+    ) -> PvResult<Option<u64>> {
+        // Debounce: don't fire within 200 ticks of last `DegenerateMode`
+        let fired_recently = self.recent(20).iter().any(|e| {
+            e.emergence_type == EmergenceType::DegenerateMode
+                && tick.saturating_sub(e.detected_at_tick) < 200
+        });
+        if fired_recently {
+            return Ok(None);
+        }
+
+        let mut stagnant = 0u32;
+        let mut indicators: Vec<&str> = Vec::new();
+
+        // 1. LTP/LTD ratio near zero (not learning)
+        let ratio = if snapshot.ltd_total == 0 && snapshot.ltp_total == 0 {
+            0.0
+        } else if snapshot.ltd_total == 0 {
+            f64::INFINITY
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            { snapshot.ltp_total as f64 / snapshot.ltd_total as f64 }
+        };
+        if ratio < 0.05 && ratio.is_finite() {
+            stagnant += 1;
+            indicators.push("LTP/LTD<0.05");
+        }
+
+        // 2. Decision unchanged for 50+ ticks
+        if tick.saturating_sub(snapshot.last_decision_change_tick) > 50
+            && snapshot.decision_action != "Stable"
+        {
+            stagnant += 1;
+            indicators.push("decision_stuck");
+        }
+
+        // 3. Weight mean stuck near floor (< 0.18)
+        if snapshot.weight_mean < 0.18 && snapshot.weight_mean > 0.0 {
+            stagnant += 1;
+            indicators.push("weights_at_floor");
+        }
+
+        // 4. Emergence dominated by single type (>80%)
+        {
+            let hist = self.history.read();
+            if hist.len() > 20 {
+                let mut counts = std::collections::HashMap::new();
+                for e in hist.iter().rev().take(50) {
+                    *counts.entry(e.emergence_type).or_insert(0u32) += 1;
+                }
+                let sum_f = f64::from(counts.values().sum::<u32>());
+                if let Some(&top) = counts.values().max() {
+                    let dominance = f64::from(top) / sum_f.max(1.0);
+                    if dominance > 0.80 {
+                        stagnant += 1;
+                        indicators.push("emergence_monoculture");
+                    }
+                }
+            }
+        }
+
+        // 5. r locked near 1.0 for 30+ ticks
+        if snapshot.r_history.len() >= 30 {
+            let tail = &snapshot.r_history[snapshot.r_history.len() - 30..];
+            if tail.iter().all(|&r| r > 0.995) {
+                stagnant += 1;
+                indicators.push("r_locked_1.0");
+            }
+        }
+
+        // 6. Zero emergence in recent history (stale detector)
+        if self.recent(5).is_empty() && tick > 100 {
+            stagnant += 1;
+            indicators.push("zero_emergence");
+        }
+
+        if stagnant >= 4 {
+            let desc = format!(
+                "{stagnant}/6 indicators stagnant: {}",
+                indicators.join(", ")
+            );
+            let confidence = (f64::from(stagnant) / 6.0).clamp(0.5, 1.0);
+            self.record_emergence(&EmergenceParams {
+                emergence_type: EmergenceType::DegenerateMode,
+                confidence,
+                severity: 0.8,
+                affected_panes: Vec::new(),
+                description: desc,
+                tick,
+                recommended_action: Some("Review metabolic health: habitat-metabolic-health".into()),
+            })
+        } else {
+            Ok(None)
+        }
     }
 
     /// Start a new emergence monitor for a specific behavior type.
@@ -1291,8 +1442,9 @@ mod tests {
     #[test]
     fn detect_coherence_lock_triggered() {
         let det = make_detector();
-        // 10 ticks of r > 0.92
-        let r_history: Vec<f64> = vec![0.95; 10];
+        // 10 ticks of r > 0.98 (Session-066 threshold). Must be high enough that
+        // computed confidence exceeds min_confidence (0.6): r=0.995 → conf=0.75.
+        let r_history: Vec<f64> = vec![0.995; 10];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_some());
     }
@@ -1300,7 +1452,7 @@ mod tests {
     #[test]
     fn detect_coherence_lock_not_triggered() {
         let det = make_detector();
-        let r_history: Vec<f64> = vec![0.88; 10]; // Below 0.92
+        let r_history: Vec<f64> = vec![0.88; 10]; // Below 0.95
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_none());
     }
@@ -1721,5 +1873,79 @@ mod tests {
         let records = det.recent(1);
         assert_eq!(records[0].recommended_action.as_deref(), Some("Clamp K"));
         assert_eq!(records[0].affected_panes.len(), 2);
+    }
+
+    // ── DegenerateMode tests (Session 066) ──
+
+    #[test]
+    fn detect_degenerate_mode_fires_on_stagnation() {
+        let det = make_detector();
+        let snap = DegenerateSnapshot {
+            ltp_total: 0, ltd_total: 0,
+            weight_mean: 0.16,
+            r_history: vec![0.999; 40],
+            decision_action: "HasBlockedAgents".into(),
+            last_decision_change_tick: 0,
+        };
+        let result = det.detect_degenerate_mode(&snap, 200).unwrap();
+        assert!(result.is_some(), "should fire with 5+ stagnant indicators");
+    }
+
+    #[test]
+    fn detect_degenerate_mode_does_not_fire_healthy() {
+        let det = make_detector();
+        let snap = DegenerateSnapshot {
+            ltp_total: 100, ltd_total: 10,
+            weight_mean: 0.35,
+            r_history: vec![0.85; 40],
+            decision_action: "Stable".into(),
+            last_decision_change_tick: 195,
+        };
+        let result = det.detect_degenerate_mode(&snap, 200).unwrap();
+        assert!(result.is_none(), "should not fire when system is healthy");
+    }
+
+    #[test]
+    fn detect_degenerate_mode_debounces() {
+        let det = make_detector();
+        let snap = DegenerateSnapshot {
+            ltp_total: 0, ltd_total: 0,
+            weight_mean: 0.16,
+            r_history: vec![0.999; 40],
+            decision_action: "HasBlockedAgents".into(),
+            last_decision_change_tick: 0,
+        };
+        let r1 = det.detect_degenerate_mode(&snap, 200).unwrap();
+        assert!(r1.is_some());
+        let r2 = det.detect_degenerate_mode(&snap, 300).unwrap();
+        assert!(r2.is_none(), "should debounce within 200 ticks");
+    }
+
+    #[test]
+    fn detect_degenerate_mode_threshold_boundary() {
+        let det = make_detector();
+        let snap = DegenerateSnapshot {
+            ltp_total: 0, ltd_total: 0,
+            weight_mean: 0.16,
+            r_history: vec![0.85; 40],
+            decision_action: "Stable".into(),
+            last_decision_change_tick: 195,
+        };
+        let result = det.detect_degenerate_mode(&snap, 50).unwrap();
+        assert!(result.is_none(), "3 indicators should not trigger (need 4+)");
+    }
+
+    #[test]
+    fn detect_degenerate_mode_infinite_ltp_is_healthy() {
+        let det = make_detector();
+        let snap = DegenerateSnapshot {
+            ltp_total: 100, ltd_total: 0,
+            weight_mean: 0.25,
+            r_history: vec![0.92; 40],
+            decision_action: "NeedsDivergence".into(),
+            last_decision_change_tick: 180,
+        };
+        let result = det.detect_degenerate_mode(&snap, 200).unwrap();
+        assert!(result.is_none(), "infinite LTP/LTD should not count as stagnant");
     }
 }

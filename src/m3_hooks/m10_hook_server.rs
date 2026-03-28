@@ -1301,17 +1301,38 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
             // At startup, the coupling network is empty (no spheres registered yet),
             // so hydrate_startup_state() restores 0 weights. Now that spheres are
             // synced from PV2 and connections exist, apply saved weights one-shot.
+            // Gen-064b: Match by PERSONA (stable across restarts) instead of PaneId
+            // (UUID, changes every restart). Build persona→PaneId mapping from
+            // current spheres, then translate saved persona pairs to current IDs.
             #[cfg(all(feature = "persistence", feature = "intelligence"))]
             if !state.coupling_hydrated.load(std::sync::atomic::Ordering::Relaxed) {
                 let net_size = state.coupling.read().connections.len();
                 if net_size > 0 {
                     if let Some(bb) = state.blackboard() {
                         if let Ok(saved) = bb.load_coupling_weights() {
+                            // Build persona → current PaneId mapping
+                            let persona_to_id: std::collections::HashMap<String, PaneId> = state
+                                .field_state
+                                .read()
+                                .spheres
+                                .iter()
+                                .filter(|(_, s)| !s.persona.is_empty())
+                                .map(|(id, s)| (s.persona.clone(), id.clone()))
+                                .collect();
+
                             let mut network = state.coupling.write();
                             let mut restored = 0u32;
                             for cw in &saved {
-                                let from = PaneId::new(&cw.from_id);
-                                let to = PaneId::new(&cw.to_id);
+                                // Try persona-based match first (Gen-064b: from_id/to_id
+                                // now store persona strings after first save cycle).
+                                let from = persona_to_id
+                                    .get(&cw.from_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| PaneId::new(&cw.from_id));
+                                let to = persona_to_id
+                                    .get(&cw.to_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| PaneId::new(&cw.to_id));
                                 if network.get_weight(&from, &to).is_some() {
                                     network.set_weight(&from, &to, cw.weight.clamp(0.0, 1.0));
                                     restored += 1;
@@ -1321,6 +1342,7 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                                 saved = saved.len(),
                                 restored,
                                 connections = network.connections.len(),
+                                personas_mapped = persona_to_id.len(),
                                 "Deferred coupling weight hydration complete"
                             );
                         }
