@@ -33,6 +33,8 @@ Then read `CLAUDE.local.md` for current session state and phase tracking.
 | `/battern` | Patterned fleet batch dispatch: roles → gate → collect → synthesize. |
 | `/nerve` | Continuous Nerve Center dashboard: ORAC + field + thermal + services (10s refresh). |
 | `/propagate` | Push command table to all service CLAUDE.md files across the Habitat. |
+| `/nvim-mastery` | Neovim RPC: LSP, treesitter, 37 keymaps, 22 snacks features, structural analysis |
+| `/atuin-mastery` | Shell history intelligence: search, stats, service density, time-of-day, KV store |
 
 ## Architecture (8 Layers, 40 Modules, 3 Binaries)
 

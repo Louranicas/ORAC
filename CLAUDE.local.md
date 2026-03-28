@@ -37,6 +37,8 @@ Then read this file for ORAC-specific session context.
 | `/battern` | Fleet batch dispatch (roles + gates + collect) |
 | `/nerve` | Continuous Nerve Center dashboard (10s refresh) |
 | `/propagate` | Push command table to all service CLAUDE.md files |
+| `/nvim-mastery` | Neovim RPC: LSP, treesitter, 37 keymaps, 22 snacks features, structural analysis |
+| `/atuin-mastery` | Shell history intelligence: search, stats, service density, time-of-day, KV store |
 
 ### Session 064 Achievements
 - 20 bugs fixed across ORAC + PV2 + SYNTHEX (11 GitLab commits, ~300 LOC)
