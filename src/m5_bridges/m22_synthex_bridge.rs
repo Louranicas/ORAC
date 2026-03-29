@@ -45,8 +45,47 @@ const THERMAL_PATH: &str = "/v3/thermal";
 /// Ingest endpoint path for posting field state.
 const INGEST_PATH: &str = "/api/ingest";
 
+/// Nexus Bus push endpoint — ORAC sends events to SYNTHEX.
+const NEXUS_PUSH_PATH: &str = "/v3/nexus/push";
+
+/// Nexus Bus pull endpoint — ORAC retrieves events from SYNTHEX.
+const NEXUS_PULL_PATH: &str = "/v3/nexus/pull";
+
 /// Default poll interval in ticks.
 const DEFAULT_POLL_INTERVAL: u64 = 6;
+
+/// Nexus Bus pull interval in ticks (pull SYNTHEX events every 3 ticks).
+const NEXUS_PULL_INTERVAL: u64 = 3;
+
+// ──────────────────────────────────────────────────────────────
+// Nexus Bus event types
+// ──────────────────────────────────────────────────────────────
+
+/// An event pushed from ORAC to SYNTHEX via the Nexus Bus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NexusEvent {
+    /// Event type discriminator.
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// Unix timestamp (seconds).
+    pub ts: u64,
+    /// Event-specific payload.
+    pub data: serde_json::Value,
+}
+
+/// Envelope for pushing events to SYNTHEX.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NexusPushEnvelope {
+    /// Batch of events to deliver.
+    pub events: Vec<NexusEvent>,
+}
+
+/// Envelope returned when pulling events from SYNTHEX.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NexusPullEnvelope {
+    /// Batch of events queued by SYNTHEX.
+    pub events: Vec<NexusEvent>,
+}
 
 // TCP_TIMEOUT_MS and MAX_RESPONSE_SIZE now in http_helpers (BUG-042)
 
@@ -295,6 +334,140 @@ impl SynthexBridge {
             return true; // Force immediate first poll
         }
         current_tick.saturating_sub(state.last_poll_tick) >= self.poll_interval
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Nexus Bus operations
+    // ──────────────────────────────────────────────────────────────
+
+    /// Push a batch of events to SYNTHEX via the Nexus Bus.
+    ///
+    /// Events are delivered as a JSON array to `POST /v3/nexus/push`.
+    /// Fire-and-forget: errors are logged but do not block the caller.
+    ///
+    /// # Errors
+    /// Returns `PvError::BridgeUnreachable` if SYNTHEX is down.
+    pub fn nexus_push(&self, events: &[NexusEvent]) -> PvResult<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let envelope = NexusPushEnvelope {
+            events: events.to_vec(),
+        };
+        let payload = serde_json::to_vec(&envelope).map_err(|e| PvError::BridgeParse {
+            service: self.service.clone(),
+            reason: format!("nexus push serialize: {e}"),
+        })?;
+        raw_http_post(&self.base_url, NEXUS_PUSH_PATH, &payload, &self.service)?;
+        Ok(())
+    }
+
+    /// Pull queued events from SYNTHEX via the Nexus Bus.
+    ///
+    /// Returns events that SYNTHEX has generated since the last pull
+    /// (thermal alerts, decay completions, diagnostic findings, etc.).
+    ///
+    /// # Errors
+    /// Returns `PvError::BridgeUnreachable` if SYNTHEX is down.
+    /// Returns `PvError::BridgeParse` if the response is malformed.
+    pub fn nexus_pull(&self) -> PvResult<Vec<NexusEvent>> {
+        let body = raw_http_get(&self.base_url, NEXUS_PULL_PATH, &self.service)?;
+        let envelope: NexusPullEnvelope =
+            serde_json::from_str(&body).map_err(|e| PvError::BridgeParse {
+                service: self.service.clone(),
+                reason: format!("nexus pull parse: {e}"),
+            })?;
+        Ok(envelope.events)
+    }
+
+    /// Check whether a Nexus Bus pull is due at the given tick.
+    #[must_use]
+    pub fn should_nexus_pull(&self, current_tick: u64) -> bool {
+        let state = self.state.read();
+        current_tick.saturating_sub(state.last_poll_tick) >= NEXUS_PULL_INTERVAL
+    }
+
+    /// Create a field update event for the Nexus Bus.
+    #[must_use]
+    pub fn make_field_event(r: f64, k: f64, spheres: u64, k_mod: f64) -> NexusEvent {
+        NexusEvent {
+            event_type: "field_update".to_owned(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            data: serde_json::json!({
+                "r": r,
+                "k": k,
+                "spheres": spheres,
+                "k_mod": k_mod,
+            }),
+        }
+    }
+
+    /// Create a RALPH mutation event for the Nexus Bus.
+    #[must_use]
+    pub fn make_ralph_event(
+        gen: u64,
+        param: &str,
+        old_val: f64,
+        new_val: f64,
+        fitness: f64,
+    ) -> NexusEvent {
+        NexusEvent {
+            event_type: "ralph_mutation".to_owned(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            data: serde_json::json!({
+                "gen": gen,
+                "param": param,
+                "old_val": old_val,
+                "new_val": new_val,
+                "fitness": fitness,
+            }),
+        }
+    }
+
+    /// Create an emergence detection event for the Nexus Bus.
+    #[must_use]
+    pub fn make_emergence_event(
+        emergence_type: &str,
+        severity: &str,
+        details: &str,
+    ) -> NexusEvent {
+        NexusEvent {
+            event_type: "emergence".to_owned(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            data: serde_json::json!({
+                "emergence_type": emergence_type,
+                "severity": severity,
+                "details": details,
+            }),
+        }
+    }
+
+    /// Create an STDP weight shift event for the Nexus Bus.
+    #[must_use]
+    pub fn make_stdp_event(
+        source: &str,
+        target: &str,
+        old_w: f64,
+        new_w: f64,
+    ) -> NexusEvent {
+        NexusEvent {
+            event_type: "stdp_shift".to_owned(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            data: serde_json::json!({
+                "source": source,
+                "target": target,
+                "old_w": old_w,
+                "new_w": new_w,
+            }),
+        }
     }
 }
 
@@ -846,5 +1019,139 @@ mod tests {
         let resp = test_thermal_response();
         let debug = format!("{resp:?}");
         assert!(debug.contains("ThermalResponse"));
+    }
+
+    // ── Nexus Bus types ──
+
+    #[test]
+    fn nexus_event_serialize_roundtrip() {
+        let event = NexusEvent {
+            event_type: "field_update".to_owned(),
+            ts: 1_711_700_000,
+            data: serde_json::json!({"r": 0.95, "k": 1.5}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: NexusEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.event_type, "field_update");
+        assert_eq!(back.ts, 1_711_700_000);
+    }
+
+    #[test]
+    fn nexus_push_envelope_serialize() {
+        let envelope = NexusPushEnvelope {
+            events: vec![NexusEvent {
+                event_type: "emergence".to_owned(),
+                ts: 0,
+                data: serde_json::json!({"type": "CoherenceLock"}),
+            }],
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("emergence"));
+        assert!(json.contains("events"));
+    }
+
+    #[test]
+    fn nexus_pull_envelope_deserialize() {
+        let json = r#"{"events":[{"type":"thermal_alert","ts":100,"data":{"temperature":0.85}}]}"#;
+        let envelope: NexusPullEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.events.len(), 1);
+        assert_eq!(envelope.events[0].event_type, "thermal_alert");
+    }
+
+    #[test]
+    fn nexus_pull_empty_events() {
+        let json = r#"{"events":[]}"#;
+        let envelope: NexusPullEnvelope = serde_json::from_str(json).unwrap();
+        assert!(envelope.events.is_empty());
+    }
+
+    #[test]
+    fn nexus_push_empty_is_noop() {
+        let bridge = SynthexBridge::with_config("127.0.0.1:19999", 6);
+        let result = bridge.nexus_push(&[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn nexus_push_fails_when_unreachable() {
+        let bridge = SynthexBridge::with_config("127.0.0.1:19999", 6);
+        let event = NexusEvent {
+            event_type: "test".to_owned(),
+            ts: 0,
+            data: serde_json::json!({}),
+        };
+        let result = bridge.nexus_push(&[event]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn nexus_pull_fails_when_unreachable() {
+        let bridge = SynthexBridge::with_config("127.0.0.1:19999", 6);
+        let result = bridge.nexus_pull();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn make_field_event_has_correct_type() {
+        let event = SynthexBridge::make_field_event(0.95, 1.5, 6, 1.0);
+        assert_eq!(event.event_type, "field_update");
+        assert!(event.ts > 0);
+        let r = event.data.get("r").and_then(|v| v.as_f64()).unwrap();
+        assert!((r - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn make_ralph_event_has_correct_type() {
+        let event = SynthexBridge::make_ralph_event(17000, "K", 1.5, 1.8, 0.83);
+        assert_eq!(event.event_type, "ralph_mutation");
+        let gen = event.data.get("gen").and_then(|v| v.as_u64()).unwrap();
+        assert_eq!(gen, 17000);
+    }
+
+    #[test]
+    fn make_emergence_event_has_correct_type() {
+        let event = SynthexBridge::make_emergence_event("CoherenceLock", "HIGH", "r > 0.999");
+        assert_eq!(event.event_type, "emergence");
+    }
+
+    #[test]
+    fn make_stdp_event_has_correct_type() {
+        let event = SynthexBridge::make_stdp_event("pane-1", "pane-2", 0.3, 0.45);
+        assert_eq!(event.event_type, "stdp_shift");
+        let old = event.data.get("old_w").and_then(|v| v.as_f64()).unwrap();
+        assert!((old - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn should_nexus_pull_respects_interval() {
+        let bridge = SynthexBridge::with_config("localhost:8090", 6);
+        bridge.set_last_poll_tick(10);
+        // NEXUS_PULL_INTERVAL = 3, tick 13 = 3 ticks since last poll
+        assert!(bridge.should_nexus_pull(13));
+    }
+
+    #[test]
+    fn should_nexus_pull_too_soon() {
+        let bridge = SynthexBridge::with_config("localhost:8090", 6);
+        bridge.set_last_poll_tick(10);
+        // Only 1 tick since last poll
+        assert!(!bridge.should_nexus_pull(11));
+    }
+
+    // ── Nexus Bus constants ──
+
+    #[test]
+    fn nexus_push_path_is_correct() {
+        assert_eq!(NEXUS_PUSH_PATH, "/v3/nexus/push");
+    }
+
+    #[test]
+    fn nexus_pull_path_is_correct() {
+        assert_eq!(NEXUS_PULL_PATH, "/v3/nexus/pull");
+    }
+
+    #[test]
+    fn nexus_pull_interval_is_three() {
+        assert_eq!(NEXUS_PULL_INTERVAL, 3);
     }
 }
