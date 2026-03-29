@@ -1215,6 +1215,28 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                 guard.record_poll_success();
             }
 
+            // Session 071 CF-1: Adaptive K guard — prevent convergence trap.
+            // When r > 0.95 sustained, lower k_modulation to inject diversity.
+            // Without this, r→1.0 locks coupling weights at ceiling and
+            // Hebbian learning produces zero weight change (7+ CC sources).
+            {
+                let r_recent = state.field_state.read().recent_r(20);
+                let sustained_high = r_recent.len() >= 20
+                    && r_recent.iter().all(|&rv| rv > 0.95);
+                if sustained_high {
+                    let mut coupling = state.coupling.write();
+                    let floor = 0.50_f64; // lowered from K_MOD_BUDGET_MIN (0.85)
+                    if coupling.k_modulation > floor {
+                        coupling.k_modulation = floor;
+                        tracing::info!(
+                            r,
+                            k_mod = coupling.k_modulation,
+                            "Adaptive K guard: r>0.95 sustained, lowered k_modulation to {floor}"
+                        );
+                    }
+                }
+            }
+
             // BUG-043 + BUG-GEN09 fix: Update dashboard with field state AND
             // sphere phase data on each poll tick.
             #[cfg(feature = "monitoring")]
@@ -1830,6 +1852,37 @@ fn build_ralph_json(state: &OracState) -> serde_json::Value {
     })
 }
 
+/// Blackboard prune handler — runs all GC operations on the ORAC blackboard.
+///
+/// Removes stale panes (>7d), completed panes (>1d), old tasks (>7d),
+/// excess ghosts, excess Hebbian summaries, excess consent audit rows,
+/// stale sessions (>7d), and compacts duplicate coupling weights.
+///
+/// Returns a JSON [`PruneReport`] with per-category counts.
+#[cfg(feature = "persistence")]
+async fn blackboard_prune_handler(
+    State(state): State<Arc<OracState>>,
+) -> Json<serde_json::Value> {
+    if let Some(bb) = state.blackboard() {
+        let report = bb.prune_all();
+        tracing::info!(
+            total = report.total(),
+            sessions = report.stale_sessions,
+            coupling = report.coupling_compacted,
+            "Blackboard prune completed"
+        );
+        Json(serde_json::json!(report))
+    } else {
+        Json(serde_json::json!({"error": "blackboard not available"}))
+    }
+}
+
+/// Blackboard prune handler stub when persistence feature is disabled.
+#[cfg(not(feature = "persistence"))]
+async fn blackboard_prune_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"error": "persistence feature not enabled"}))
+}
+
 /// Metrics handler — Prometheus-compatible text format.
 ///
 /// Reports sessions, uptime, and blackboard fleet metrics.
@@ -2336,6 +2389,7 @@ pub fn build_router(state: Arc<OracState>) -> Router {
         .route("/field", get(field_handler))
         .route("/thermal", get(thermal_handler))
         .route("/blackboard", get(blackboard_handler))
+        .route("/blackboard/prune", post(blackboard_prune_handler))
         .route("/metrics", get(metrics_handler))
         .route("/field/ghosts", get(field_ghosts_handler))
         .route("/traces", get(traces_handler))

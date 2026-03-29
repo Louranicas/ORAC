@@ -1177,6 +1177,46 @@ fn post_state_to_rm(state: &OracState, tick: u64) {
 
 /// Relay emergence events to Reasoning Memory for cross-session persistence.
 ///
+/// Session 071 #7: Relay emergence hints to ME V2 evolution chamber.
+/// `CoherenceLock` → ME hint "lower `r_target`". `ThermalSpike` → ME hint "thermal".
+/// Creates cross-pollination: ORAC fleet intelligence feeds ME service evolution.
+///
+/// **Data flow:** ORAC `EmergenceDetector` → ME `:8080` `/api/tools/learning-cycle` (HTTP POST)
+#[cfg(all(feature = "bridges", feature = "evolution"))]
+fn relay_emergence_to_me(state: &OracState, tick: u64) {
+    let recent = state.ralph.emergence().recent(3);
+    for record in &recent {
+        if record.detected_at_tick != tick {
+            continue;
+        }
+        // Only relay actionable emergence types
+        let hint = match record.emergence_type {
+            EmergenceType::CoherenceLock => "coherence_lock: lower r_target or increase diversity",
+            EmergenceType::ThermalSpike => "thermal_spike: reduce load or cool system",
+            EmergenceType::CouplingRunaway => "coupling_runaway: reduce K modulation",
+            _ => continue,
+        };
+        let body = format!(
+            r#"{{"tool_id":"learning-cycle","params":{{"hint":"{hint}","source":"orac-emergence","tick":{tick}}}}}"#,
+        );
+        let addr = "127.0.0.1:8080";
+        let request = format!(
+            "POST /api/tools/learning-cycle HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        // Fire-and-forget — ME processes asynchronously
+        if let Ok(stream) = std::net::TcpStream::connect_timeout(
+            &addr.parse().unwrap_or_else(|_| std::net::SocketAddr::from(([127,0,0,1], 8080))),
+            std::time::Duration::from_secs(1),
+        ) {
+            use std::io::Write;
+            let mut s = stream;
+            let _ = s.write_all(request.as_bytes());
+            tracing::info!(etype = %record.emergence_type, hint, "Emergence hint relayed to ME");
+        }
+    }
+}
+
 /// When new emergence events are detected this tick, posts them to RM as TSV
 /// records with category "emergence". This enables cross-session correlation:
 /// future sessions can search RM for historical emergence patterns.
@@ -1786,9 +1826,12 @@ fn spawn_ralph_loop(
                     }
 
                     // Gen-060a: Relay new emergence events to RM for cross-session persistence.
-                    // Creates ORAC→RM emergence data flow (new cross-service integration).
                     #[cfg(all(feature = "bridges", feature = "evolution"))]
                     relay_emergence_to_rm(&state, tick);
+
+                    // Session 071 #7: Relay emergence hints to ME evolution chamber.
+                    #[cfg(all(feature = "bridges", feature = "evolution"))]
+                    relay_emergence_to_me(&state, tick);
 
                     // METABOLIC-GAP-1 fix: Post field state to SYNTHEX /api/ingest
                     // every 6 ticks to feed heat sources (HS-001 r, HS-003 fitness,

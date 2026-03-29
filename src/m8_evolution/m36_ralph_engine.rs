@@ -50,7 +50,10 @@ const DEFAULT_ROLLBACK_THRESHOLD: f64 = -0.01;
 const DEFAULT_VERIFICATION_TICKS: u64 = 10;
 
 /// Default maximum RALPH cycles before pause.
-const DEFAULT_MAX_CYCLES: u64 = 1000;
+/// Session 071 fix: 1000 was too low — at 5s ticks, 1000 cycles = ~83 min.
+/// System runs for days. Set high so RALPH never auto-pauses; convergence
+/// detection via fitness variance handles the real stopping condition.
+const DEFAULT_MAX_CYCLES: u64 = 1_000_000;
 
 /// Default maximum snapshot history.
 const DEFAULT_SNAPSHOT_CAPACITY: usize = 50;

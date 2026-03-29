@@ -340,6 +340,14 @@ impl AppState {
         self.r_history.push_back(r);
     }
 
+    /// Return the last `n` R values from history (Session 071 CF-1 support).
+    #[must_use]
+    pub fn recent_r(&self, n: usize) -> Vec<f64> {
+        let len = self.r_history.len();
+        let start = len.saturating_sub(n);
+        self.r_history.iter().skip(start).copied().collect()
+    }
+
     /// Update exponential moving averages for divergence and coherence signals.
     ///
     /// `divergence` and `coherence` are instantaneous signal values (typically
