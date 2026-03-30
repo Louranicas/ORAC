@@ -11,7 +11,7 @@ use orac_sidecar::m2_wire::m07_ipc_client::IpcClient;
 use orac_sidecar::m2_wire::m08_bus_types::{BusEvent, BusFrame};
 
 #[cfg(all(feature = "intelligence", feature = "evolution"))]
-use orac_sidecar::m4_intelligence::m18_hebbian_stdp::apply_stdp;
+use orac_sidecar::m4_intelligence::m18_hebbian_stdp::{apply_stdp, decay_all_weights};
 
 #[cfg(feature = "api")]
 use orac_sidecar::m3_hooks::m10_hook_server::{build_router, spawn_field_poller, OracState};
@@ -1529,6 +1529,11 @@ fn spawn_ralph_loop(
                             );
                         }
 
+                        // Session 072: Apply gentle weight decay every tick to prevent
+                        // coupling ceiling lock (0.75) and regulate LTP/LTD ratio.
+                        // Factor 0.999 = 0.1% decay per tick = ~1% per 10 ticks.
+                        decay_all_weights(&mut state.coupling.write(), 0.999);
+
                         if stdp_result.ltp_count > 0 || stdp_result.ltd_count > 0 {
                             // BUG-SCAN-001 fix: record last tick STDP ran for /health
                             state.hebbian_last_tick.store(tick, std::sync::atomic::Ordering::Relaxed);
@@ -1695,6 +1700,24 @@ fn spawn_ralph_loop(
                         }
                     }
 
+                    // Session 072: Push RALPH evolution state to SYNTHEX via Nexus Bus.
+                    // Gives SYNTHEX real-time visibility into fitness trajectory and
+                    // mutation activity for thermal PID regulation. Every 6 ticks.
+                    #[cfg(all(feature = "bridges", feature = "evolution"))]
+                    if tick % 6 == 0 && state.breaker_allows("synthex") {
+                        let rs = state.ralph.state();
+                        let event = orac_sidecar::m5_bridges::m22_synthex_bridge::SynthexBridge::make_ralph_event(
+                            rs.generation,
+                            rs.phase.name(),
+                            rs.current_fitness,
+                            rs.current_fitness,
+                            rs.current_fitness,
+                        );
+                        if let Err(e) = state.synthex_bridge.nexus_push(&[event]) {
+                            tracing::debug!("Nexus RALPH push failed: {e}");
+                        }
+                    }
+
                     // GAP-C fix: Persist RALPH state to blackboard every 60 ticks
                     // so evolution survives ORAC restarts.
                     #[cfg(all(feature = "persistence", feature = "evolution"))]
@@ -1821,6 +1844,32 @@ fn spawn_ralph_loop(
                                     }
                                     _ => {}
                                 }
+                            }
+                        }
+                    }
+
+                    // Session 072: Push emergence events to SYNTHEX via Nexus Bus.
+                    // Cross-service flow: emergence detector → Nexus Bus → SYNTHEX thermal.
+                    // Replaces manual curl; events now flow automatically each tick.
+                    #[cfg(all(feature = "bridges", feature = "evolution"))]
+                    if state.breaker_allows("synthex") {
+                        let recent = state.ralph.emergence().recent(5);
+                        let nexus_events: Vec<_> = recent
+                            .iter()
+                            .filter(|rec| rec.detected_at_tick == tick)
+                            .map(|rec| {
+                                orac_sidecar::m5_bridges::m22_synthex_bridge::SynthexBridge::make_emergence_event(
+                                    &rec.emergence_type.to_string(),
+                                    &format!("{:.2}", rec.confidence),
+                                    &format!("tick={tick} type={}", rec.emergence_type),
+                                )
+                            })
+                            .collect();
+                        if !nexus_events.is_empty() {
+                            if let Err(e) = state.synthex_bridge.nexus_push(&nexus_events) {
+                                tracing::debug!("Nexus emergence push failed: {e}");
+                            } else {
+                                tracing::info!(count = nexus_events.len(), "Nexus emergence events pushed to SYNTHEX");
                             }
                         }
                     }

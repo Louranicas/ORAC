@@ -20,7 +20,10 @@ use super::m15_coupling_network::CouplingNetwork;
 ///
 /// Prevents LTP from pushing weights to 1.0 where they saturate
 /// and produce zero delta, permanently stalling learning.
-const HEBBIAN_SOFT_CEILING: f64 = 0.85;
+/// Session 072: Lowered from 0.85 to 0.75 to restore weight differentiation.
+/// At 0.85, weights saturate and LTP produces zero effective delta.
+/// At 0.75, usable band is [0.15, 0.75] = 0.60 range for STDP learning.
+const HEBBIAN_SOFT_CEILING: f64 = 0.75;
 
 // ──────────────────────────────────────────────────────────────
 // STDP update
@@ -104,16 +107,28 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
 
                 ltp
             } else if either_working {
-                // G3 idle-gating: skip LTD when the non-working endpoint
-                // has zero memories and zero recent activity. Prevents 66+
-                // idle orac-agent spheres from generating parasitic LTD that
-                // overwhelms all LTP (Session 066 fix: LTD/LTP was 25:1).
+                // G3 idle-gating: skip LTD for truly phantom spheres that have
+                // never participated in the Kuramoto field (`total_steps == 0`).
+                // Previous check used `memories.is_empty()` which was always true
+                // because ORAC's PV2 sphere cache never populates the memories Vec
+                // (Session 070 fix: LTD was permanently 0).
                 let idle_sphere = if from_working { to_sphere } else { from_sphere };
-                if idle_sphere.memories.is_empty() && idle_sphere.activity_30s == 0 {
+                if idle_sphere.total_steps == 0 && idle_sphere.activity_30s == 0 {
                     return None;
                 }
-                // LTD: one active, one idle (with meaningful state) — active depression
-                -m04_constants::HEBBIAN_LTD
+                // LTD: one active, one idle (with meaningful state) — active depression.
+                // Scale LTD inversely with working/idle ratio to prevent parasitic
+                // depression when few spheres are active (Session 066 redux).
+                let idle_eligible = spheres.len().saturating_sub(working.len()).max(1);
+                // Sphere counts are bounded by SPHERE_CAP (200) so u32 is safe.
+                #[allow(clippy::cast_possible_truncation)]
+                let working_u32 = working.len() as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let idle_u32 = idle_eligible as u32;
+                let damping = (f64::from(working_u32) * 3.0
+                    / f64::from(idle_u32))
+                .min(1.0);
+                -m04_constants::HEBBIAN_LTD * damping
             } else {
                 // G2 idle-idle skip: both endpoints idle — no STDP update.
                 // Prevents 98%+ saturation at floor when few spheres are working
@@ -208,7 +223,6 @@ pub fn are_coactive(sphere_a: &PaneSphere, sphere_b: &PaneSphere) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::m1_core::m01_core_types::SphereMemory;
     use approx::assert_relative_eq;
 
     fn pid(s: &str) -> PaneId {
@@ -222,15 +236,10 @@ mod tests {
     }
 
     fn idle_sphere(id: &str) -> PaneSphere {
-        // G3 idle gating: give idle spheres a memory so they are NOT
-        // gated (empty+inactive spheres skip LTD since Session 066).
+        // G3 idle gating: give idle spheres total_steps > 0 so they are NOT
+        // gated (zero-step+inactive spheres skip LTD). Session 070 fix.
         let mut s = PaneSphere::new(pid(id), "test");
-        s.memories.push(SphereMemory::new(
-            0,
-            crate::m1_core::m01_core_types::Point3D { x: 0.0, y: 0.0, z: 0.0 },
-            "test".into(),
-            "test".into(),
-        ));
+        s.total_steps = 10;
         s
     }
 

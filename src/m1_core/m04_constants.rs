@@ -113,7 +113,10 @@ pub const K_MOD_MIN: f64 = -0.5;
 pub const K_MOD_MAX: f64 = 1.5;
 
 /// Combined external influence floor (budget constraint).
-pub const K_MOD_BUDGET_MIN: f64 = 0.85;
+/// Session 072: Lowered from 0.85 to 0.60 to break convergence trap.
+/// With `K=1.5` and `N=6`, `K_MOD_BUDGET_MIN=0.85` gives floor 1.275 (supercritical).
+/// At 0.60, floor is 0.90 — subcritical, allows phase diversity and STDP learning.
+pub const K_MOD_BUDGET_MIN: f64 = 0.60;
 
 /// Combined external influence ceiling (budget constraint).
 pub const K_MOD_BUDGET_MAX: f64 = 1.15;
