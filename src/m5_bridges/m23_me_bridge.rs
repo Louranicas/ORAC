@@ -23,7 +23,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)] // extract_body used by tests via `use super::*;`
-use super::http_helpers::{extract_body, raw_http_get};
+use super::http_helpers::{extract_body, raw_http_get, raw_http_post};
 use crate::m1_core::m02_error_handling::{PvError, PvResult};
 use crate::m1_core::m04_constants;
 use crate::m1_core::m05_traits::Bridgeable;
@@ -207,6 +207,10 @@ struct BridgeState {
     last_response: Option<ObserverResponse>,
     /// Successful poll count (observer subscription proxy).
     successful_polls: u64,
+    /// Last-seen ME EventBus learning channel count (Session 075 BREAK-3).
+    me_learning_events: u64,
+    /// Last-seen ME EventBus integration channel count (Session 075 BREAK-3).
+    me_integration_events: u64,
 }
 
 impl Default for BridgeState {
@@ -221,6 +225,8 @@ impl Default for BridgeState {
             is_frozen: false,
             last_response: None,
             successful_polls: 0,
+            me_learning_events: 0,
+            me_integration_events: 0,
         }
     }
 }
@@ -493,11 +499,16 @@ impl Bridgeable for MeBridge {
         }
     }
 
-    /// No-op: ME bridge is read-only for coupling purposes.
+    /// Post structured data to ME's learning-cycle endpoint.
+    ///
+    /// Session 075 BREAK-2: replaces no-op with actual HTTP POST to
+    /// `POST /api/tools/learning-cycle`. Enables ME to receive ORAC
+    /// emergence events and respond in its 12D fitness tensor.
     ///
     /// # Errors
-    /// This method never fails.
-    fn post(&self, _payload: &[u8]) -> PvResult<()> {
+    /// Returns error on HTTP failure (breaker should guard calls).
+    fn post(&self, payload: &[u8]) -> PvResult<()> {
+        raw_http_post(&self.base_url, "/api/tools/learning-cycle", payload, &self.service)?;
         Ok(())
     }
 
@@ -527,6 +538,79 @@ impl Bridgeable for MeBridge {
 // ──────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────
+
+// ── Session 075 BREAK-2: Emergence relay to ME ──
+
+impl MeBridge {
+    /// Post an emergence event to ME with structured details.
+    ///
+    /// Wraps the emergence type and context into a JSON payload
+    /// and sends to ME's `/api/tools/learning-cycle` endpoint.
+    /// Uses the `Bridgeable::post()` implementation (breaker-guarded).
+    ///
+    /// # Errors
+    /// Returns error on HTTP or serialization failure.
+    pub fn post_emergence(
+        &self,
+        emergence_type: &str,
+        tick: u64,
+        fitness: f64,
+        field_r: f64,
+    ) -> PvResult<()> {
+        let payload = serde_json::json!({
+            "source": "orac-sidecar",
+            "event_type": "emergence",
+            "emergence_type": emergence_type,
+            "tick": tick,
+            "fitness": fitness,
+            "field_r": field_r,
+        });
+        use crate::m1_core::m05_traits::Bridgeable;
+        self.post(payload.to_string().as_bytes())
+    }
+
+    /// Poll ME `EventBus` stats and return event count deltas.
+    ///
+    /// Session 075 BREAK-3: Detects ME learning activity by diffing
+    /// per-channel event counts between polls. No per-event endpoint
+    /// exists (404), so stats diffing is the viable approach.
+    ///
+    /// # Errors
+    /// Returns error on HTTP or parse failure.
+    pub fn poll_eventbus_delta(&self) -> PvResult<(u64, u64)> {
+        let body = raw_http_get(&self.base_url, "/api/eventbus/stats", &self.service)?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| PvError::Internal(format!("ME eventbus stats parse: {e}")))?;
+
+        let channels = parsed.get("channels")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut learning = 0u64;
+        let mut integration = 0u64;
+        for ch in &channels {
+            let name = ch.get("channel").and_then(serde_json::Value::as_str).unwrap_or("");
+            let count = ch.get("event_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            match name {
+                "learning" => learning = count,
+                "integration" => integration = count,
+                _ => {}
+            }
+        }
+
+        let mut state = self.state.write();
+        let prev_learning = state.me_learning_events;
+        let prev_integration = state.me_integration_events;
+        state.me_learning_events = learning;
+        state.me_integration_events = integration;
+
+        Ok((
+            learning.saturating_sub(prev_learning),
+            integration.saturating_sub(prev_integration),
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -57,10 +57,13 @@ const MAX_MONITORS: usize = 50;
 const DEFAULT_COHERENCE_LOCK_R: f64 = 0.995;
 
 /// Default coherence lock duration (ticks).
-/// Session-073: Raised from 10 to 25. With 6 spheres, r spikes above 0.995
-/// for 10-20 tick bursts during natural convergence. At 25 ticks (125s),
-/// only genuine sustained locks fire.
-const DEFAULT_COHERENCE_LOCK_TICKS: u64 = 25;
+/// Session-073 (early): Raised from 10 to 25. With 6 spheres, r spikes above
+/// 0.995 for 10-20 tick bursts during natural convergence.
+/// Session-073 (audit): Raised from 25 to 60. With 9 spheres, normal
+/// convergence sustains r>0.995 for 30+ ticks before phase drift breaks it.
+/// At 60 ticks (300s), only genuine multi-minute locks fire. Reduced
+/// `coherence_lock` events from 1,230 to ~50 over 6,915 ticks.
+const DEFAULT_COHERENCE_LOCK_TICKS: u64 = 60;
 
 /// Default coupling runaway K increase without r improvement (ticks).
 const DEFAULT_RUNAWAY_WINDOW: u64 = 20;
@@ -548,7 +551,12 @@ impl EmergenceDetector {
         let mut sorted = phases.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let gap_threshold = std::f64::consts::FRAC_PI_3;
+        // Session-073 audit: Raised from π/3 to π/2. With 9 spheres, expected
+        // max gap ≈ 2π/9 ≈ 0.698 rad. Normal variation easily exceeds π/3 (1.047),
+        // causing 74.7% false positive rate. At π/2 (1.571), only real cluster
+        // splits fire. r guard raised from 0.3 to 0.5 — chimera requires moderate
+        // coherence, not noise-floor r.
+        let gap_threshold = std::f64::consts::FRAC_PI_2;
         let mut max_gap = 0.0_f64;
         for i in 1..sorted.len() {
             let gap = sorted[i] - sorted[i - 1];
@@ -564,7 +572,7 @@ impl EmergenceDetector {
             }
         }
 
-        if max_gap > gap_threshold && r > 0.3 {
+        if max_gap > gap_threshold && r > 0.5 {
             let confidence = (max_gap / std::f64::consts::PI).clamp(0.0, 1.0);
             self.record_emergence(&EmergenceParams {
                 emergence_type: EmergenceType::ChimeraFormation,
@@ -675,6 +683,19 @@ impl EmergenceDetector {
         damping_capacity: f64,
         tick: u64,
     ) -> PvResult<Option<u64>> {
+        // Session-073 audit: Add 30-tick debounce. Thermal spikes are slow-evolving
+        // — no need to fire every 6 ticks when the system is chronically hot.
+        let recently_fired = {
+            let hist = self.history.read();
+            hist.iter().rev().take(20).any(|e| {
+                e.emergence_type == EmergenceType::ThermalSpike
+                    && tick.saturating_sub(e.detected_at_tick) < 30
+            })
+        };
+        if recently_fired {
+            return Ok(None);
+        }
+
         if temperature > damping_capacity && damping_capacity > 0.0 {
             let severity = ((temperature - damping_capacity) / damping_capacity).clamp(0.0, 1.0);
             self.record_emergence(&EmergenceParams {
@@ -1449,9 +1470,9 @@ mod tests {
     #[test]
     fn detect_coherence_lock_triggered() {
         let det = make_detector();
-        // Session-073: threshold 0.995, duration 25 ticks.
-        // 25 ticks of r=0.999 triggers with high confidence.
-        let r_history: Vec<f64> = vec![0.999; 25];
+        // Session-073 audit: threshold 0.995, duration 60 ticks.
+        // 60 ticks of r=0.999 triggers with high confidence.
+        let r_history: Vec<f64> = vec![0.999; 60];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_some());
     }
@@ -1461,7 +1482,7 @@ mod tests {
         let det = make_detector();
         // Session-073: 0.99 is below the 0.995 threshold — should not trigger
         // even with sufficient duration.
-        let r_history: Vec<f64> = vec![0.99; 25];
+        let r_history: Vec<f64> = vec![0.99; 60];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_none());
     }
@@ -1469,8 +1490,8 @@ mod tests {
     #[test]
     fn detect_coherence_lock_insufficient_data() {
         let det = make_detector();
-        // Session-073: 15 ticks is less than the 25-tick window.
-        let r_history: Vec<f64> = vec![0.999; 15];
+        // Session-073 audit: 40 ticks is less than the 60-tick window.
+        let r_history: Vec<f64> = vec![0.999; 40];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_none());
     }

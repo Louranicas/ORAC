@@ -52,7 +52,11 @@ const DEFAULT_ACCEPT_THRESHOLD: f64 = 0.05;
 const DEFAULT_ROLLBACK_THRESHOLD: f64 = -0.03;
 
 /// Default verification window (ticks to wait before harvest).
-const DEFAULT_VERIFICATION_TICKS: u64 = 10;
+/// Session-073: Raised from 10 to 30. At 5s ticks, 10 ticks = 50s was too
+/// short for fitness changes to stabilize after mutation. 30 ticks = 150s
+/// gives the Kuramoto field and Hebbian STDP time to propagate effects
+/// before the accept/rollback decision.
+const DEFAULT_VERIFICATION_TICKS: u64 = 30;
 
 /// Default maximum RALPH cycles before pause.
 /// Session 071 fix: 1000 was too low — at 5s ticks, 1000 cycles = ~83 min.
@@ -62,6 +66,18 @@ const DEFAULT_MAX_CYCLES: u64 = 1_000_000;
 
 /// Default maximum snapshot history.
 const DEFAULT_SNAPSHOT_CAPACITY: usize = 50;
+
+/// Fitness standard deviation threshold for convergence detection.
+/// When fitness std-dev stays below this for [`CONVERGENCE_GENERATIONS`]
+/// consecutive generations, RALPH auto-pauses — further mutations
+/// would be accepted/rejected on jitter, not genuine improvement.
+const CONVERGENCE_STDDEV_THRESHOLD: f64 = 0.02;
+
+/// Consecutive generations below [`CONVERGENCE_STDDEV_THRESHOLD`] before pause.
+const CONVERGENCE_GENERATIONS: usize = 50;
+
+/// Ring buffer capacity for convergence fitness samples.
+const CONVERGENCE_BUFFER_CAP: usize = 60;
 
 // ──────────────────────────────────────────────────────────────
 // Enums
@@ -260,6 +276,27 @@ pub struct RalphState {
     pub system_state: SystemState,
 }
 
+/// Session 076: Record of a completed mutation for learning feedback.
+///
+/// Captures what was mutated, the fitness delta, and whether it was accepted.
+/// The Learn phase mines this journal to weight future mutations toward
+/// parameters that historically improve fitness.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MutationJournalEntry {
+    /// RALPH generation when proposed.
+    pub generation: u64,
+    /// Parameter that was mutated.
+    pub parameter: String,
+    /// Value before mutation.
+    pub old_value: f64,
+    /// Value after mutation.
+    pub new_value: f64,
+    /// Fitness delta (post - pre).
+    pub fitness_delta: f64,
+    /// Whether the mutation was accepted (true) or rolled back (false).
+    pub accepted: bool,
+}
+
 /// RALPH engine aggregate statistics.
 #[derive(Clone, Debug, Default)]
 pub struct RalphStats {
@@ -328,6 +365,14 @@ pub struct RalphEngine {
     config: RalphEngineConfig,
     /// Aggregate statistics.
     stats: RwLock<RalphStats>,
+    /// Ring buffer of recent fitness values for convergence detection.
+    convergence_buffer: RwLock<VecDeque<f64>>,
+    /// Consecutive generations where fitness std-dev < threshold.
+    convergence_streak: RwLock<usize>,
+    /// Session 076: Journal of completed mutations for learning feedback.
+    /// The Learn phase mines this to identify which parameters historically
+    /// improve fitness, biasing future mutation selection.
+    mutation_journal: RwLock<VecDeque<MutationJournalEntry>>,
 }
 
 impl fmt::Debug for RalphEngine {
@@ -374,6 +419,9 @@ impl RalphEngine {
             selector,
             config,
             stats: RwLock::new(RalphStats::default()),
+            convergence_buffer: RwLock::new(VecDeque::with_capacity(CONVERGENCE_BUFFER_CAP)),
+            convergence_streak: RwLock::new(0),
+            mutation_journal: RwLock::new(VecDeque::with_capacity(100)),
         }
     }
 
@@ -446,6 +494,12 @@ impl RalphEngine {
         &self.selector
     }
 
+    /// Get the mutation journal (Session 076 learning feedback).
+    #[must_use]
+    pub fn mutation_journal(&self) -> Vec<MutationJournalEntry> {
+        self.mutation_journal.read().iter().cloned().collect()
+    }
+
     /// Get recent mutation history.
     #[must_use]
     pub fn recent_mutations(&self, limit: usize) -> Vec<MutationRecord> {
@@ -468,6 +522,56 @@ impl RalphEngine {
     /// Resume the RALPH loop.
     pub fn resume(&self) {
         *self.paused.write() = false;
+    }
+
+    /// Check whether fitness has converged (std-dev below threshold).
+    ///
+    /// Samples the current fitness into a ring buffer each generation.
+    /// If the standard deviation of the buffer stays below
+    /// [`CONVERGENCE_STDDEV_THRESHOLD`] for [`CONVERGENCE_GENERATIONS`]
+    /// consecutive calls, RALPH auto-pauses.
+    fn check_convergence(&self) {
+        let Some(fitness) = self.fitness.current_fitness() else {
+            return;
+        };
+
+        // Push fitness into ring buffer
+        {
+            let mut buf = self.convergence_buffer.write();
+            if buf.len() >= CONVERGENCE_BUFFER_CAP {
+                buf.pop_front();
+            }
+            buf.push_back(fitness);
+        }
+
+        let buf = self.convergence_buffer.read();
+        if buf.len() < 10 {
+            // Not enough samples yet
+            return;
+        }
+
+        // Compute mean and std-dev
+        #[allow(clippy::cast_precision_loss)]
+        let n = buf.len() as f64;
+        let mean = buf.iter().sum::<f64>() / n;
+        let variance = buf.iter().map(|&f| (f - mean).powi(2)).sum::<f64>() / n;
+        let stddev = variance.sqrt();
+
+        let mut streak = self.convergence_streak.write();
+        if stddev < CONVERGENCE_STDDEV_THRESHOLD {
+            *streak += 1;
+            if *streak >= CONVERGENCE_GENERATIONS {
+                *self.paused.write() = true;
+                tracing::info!(
+                    stddev = format!("{stddev:.4}"),
+                    streak = *streak,
+                    mean = format!("{mean:.4}"),
+                    "RALPH auto-paused: fitness converged (std-dev < {CONVERGENCE_STDDEV_THRESHOLD} for {CONVERGENCE_GENERATIONS} gens)"
+                );
+            }
+        } else {
+            *streak = 0;
+        }
     }
 
     /// Hydrate RALPH state from persisted storage (blackboard).
@@ -531,6 +635,13 @@ impl RalphEngine {
 
         // Evaluate fitness
         self.fitness.evaluate(tensor, tick, Some(generation))?;
+
+        // Convergence detection: sample fitness once per generation.
+        // If std-dev < threshold for N consecutive generations, pause.
+        self.check_convergence();
+        if *self.paused.read() {
+            return Ok(());
+        }
 
         // Track peak fitness (BUG-042: was only updated in Harvest, unreachable
         // when all mutations are skipped — now updated every cycle)
@@ -669,6 +780,11 @@ impl RalphEngine {
                     );
                 }
             }
+        }
+
+        // ── Source 4: Mutation journal → historically effective parameter ──
+        if hint.is_none() {
+            hint = self.journal_best_parameter();
         }
 
         // Store hint for Propose phase
@@ -811,6 +927,36 @@ impl RalphEngine {
                 }
             }
 
+            // Session 076: Record to mutation journal for Learn phase mining.
+            {
+                let old_val = active_mut
+                    .snapshot
+                    .parameters
+                    .iter()
+                    .find(|ps| ps.name == param)
+                    .map_or(0.0, |ps| ps.value);
+                let new_val = self
+                    .selector
+                    .get_parameter(&param)
+                    .map_or(old_val, |p| p.current_value);
+                let entry = MutationJournalEntry {
+                    generation: active_mut.generation,
+                    parameter: param.clone(),
+                    old_value: old_val,
+                    new_value: new_val,
+                    fitness_delta: delta,
+                    accepted: matches!(
+                        harvest_status,
+                        MutationStatus::Accepted
+                    ),
+                };
+                let mut journal = self.mutation_journal.write();
+                if journal.len() >= 100 {
+                    journal.pop_front();
+                }
+                journal.push_back(entry);
+            }
+
             // Clear active mutation
             *self.active_mutation.write() = None;
 
@@ -832,6 +978,50 @@ impl RalphEngine {
 
         // Back to Recognize
         *self.phase.write() = RalphPhase::Recognize;
+    }
+
+    // ── Journal Mining ──
+
+    /// Mine mutation journal for the parameter with highest average positive
+    /// fitness delta. Returns `None` if journal has fewer than 5 entries or
+    /// no parameter has 2+ accepted mutations with positive sum.
+    fn journal_best_parameter(&self) -> Option<String> {
+        let journal = self.mutation_journal.read();
+        if journal.len() < 5 {
+            return None;
+        }
+        let mut scores: std::collections::HashMap<&str, (f64, usize)> =
+            std::collections::HashMap::new();
+        for entry in journal.iter() {
+            let (sum, count) = scores.entry(&entry.parameter).or_insert((0.0, 0));
+            if entry.accepted {
+                *sum += entry.fitness_delta;
+            }
+            *count += 1;
+        }
+        // Journal cap is 100 entries, count ≤ 100 — no precision loss.
+        #[allow(clippy::cast_precision_loss)]
+        let best = scores
+            .iter()
+            .filter(|(_, (s, c))| *c >= 2 && *s > 0.0)
+            .max_by(|a, b| {
+                let avg_a = a.1 .0 / a.1 .1 as f64;
+                let avg_b = b.1 .0 / b.1 .1 as f64;
+                avg_a.partial_cmp(&avg_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        #[allow(clippy::cast_precision_loss)]
+        if let Some((param, (sum, count))) = best {
+            let avg = sum / *count as f64;
+            tracing::debug!(
+                param = *param,
+                avg_delta = format!("{avg:.4}"),
+                samples = count,
+                "Learn: journal-guided hint"
+            );
+            Some((*param).to_owned())
+        } else {
+            None
+        }
     }
 
     // ── Snapshot / Rollback ──
@@ -895,6 +1085,8 @@ impl RalphEngine {
         self.correlation.reset();
         self.selector.reset();
         *self.stats.write() = RalphStats::default();
+        self.convergence_buffer.write().clear();
+        *self.convergence_streak.write() = 0;
     }
 }
 
@@ -1301,14 +1493,20 @@ mod tests {
     fn system_state_reflects_fitness() {
         let engine = make_engine();
 
-        // Low fitness
+        // Low fitness — prime smoothing buffers (Session 073).
+        // Need enough ticks for the volatile rolling mean to converge
+        // even though only Recognize+Analyze phases call evaluate().
         let tensor = make_tensor(0.2);
-        engine.tick(&tensor, 1).unwrap();
+        for tick in 1..=20 {
+            engine.tick(&tensor, tick).unwrap();
+        }
         assert_eq!(engine.state().system_state, SystemState::Failed);
 
-        // High fitness
+        // High fitness — flush residual 0.2 values from smoothing buffers.
         let tensor = make_tensor(0.95);
-        engine.tick(&tensor, 2).unwrap();
+        for tick in 21..=50 {
+            engine.tick(&tensor, tick).unwrap();
+        }
         assert_eq!(engine.state().system_state, SystemState::Optimal);
     }
 
@@ -1452,5 +1650,79 @@ mod tests {
         // Hint should be cleared after Propose consumed it
         assert!(engine.learned_hint.read().is_none(),
             "learned hint should be None after Propose phase consumes it");
+    }
+
+    // ── Convergence detection ──
+
+    #[test]
+    fn convergence_pauses_on_flat_fitness() {
+        let engine = RalphEngine::with_config(RalphEngineConfig {
+            verification_ticks: 0,
+            ..Default::default()
+        });
+
+        // Feed constant fitness (std-dev = 0) for many generations
+        let tensor = make_tensor(0.5);
+        // 5 ticks per cycle, need 50+ generations → 250+ ticks
+        for tick in 1..=300 {
+            engine.tick(&tensor, tick).unwrap();
+        }
+
+        assert!(engine.state().paused,
+            "RALPH should auto-pause after 50+ flat-fitness generations");
+    }
+
+    #[test]
+    fn convergence_resets_on_volatile_fitness() {
+        let engine = RalphEngine::with_config(RalphEngineConfig {
+            verification_ticks: 0,
+            ..Default::default()
+        });
+
+        // Run 40 flat generations (below threshold of 50)
+        let tensor = make_tensor(0.5);
+        for tick in 1..=200 {
+            engine.tick(&tensor, tick).unwrap();
+        }
+        assert!(!engine.state().paused, "should NOT pause before 50 gens");
+
+        // Inject a big fitness swing — resets streak
+        let volatile_tensor = make_tensor(0.9);
+        for tick in 201..=210 {
+            engine.tick(&volatile_tensor, tick).unwrap();
+        }
+        assert_eq!(*engine.convergence_streak.read(), 0,
+            "streak should reset after volatile fitness");
+    }
+
+    #[test]
+    fn convergence_buffer_bounded() {
+        let engine = RalphEngine::with_config(RalphEngineConfig {
+            verification_ticks: 0,
+            ..Default::default()
+        });
+
+        let tensor = make_tensor(0.5);
+        for tick in 1..=500 {
+            engine.tick(&tensor, tick).unwrap();
+        }
+
+        let buf_len = engine.convergence_buffer.read().len();
+        assert!(buf_len <= CONVERGENCE_BUFFER_CAP,
+            "convergence buffer should not exceed cap ({buf_len} > {CONVERGENCE_BUFFER_CAP})");
+    }
+
+    #[test]
+    fn reset_clears_convergence() {
+        let engine = make_engine();
+        let tensor = make_tensor(0.5);
+        for tick in 1..=50 {
+            engine.tick(&tensor, tick).unwrap();
+        }
+        assert!(!engine.convergence_buffer.read().is_empty());
+
+        engine.reset();
+        assert!(engine.convergence_buffer.read().is_empty());
+        assert_eq!(*engine.convergence_streak.read(), 0);
     }
 }

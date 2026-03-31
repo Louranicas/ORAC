@@ -55,6 +55,18 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
     network: &mut CouplingNetwork,
     spheres: &HashMap<PaneId, PaneSphere, S>,
 ) -> StdpResult {
+    apply_stdp_with_ltp(network, spheres, m04_constants::HEBBIAN_LTP)
+}
+
+/// Apply STDP with a RALPH-tuned LTP base rate.
+///
+/// Session 076: Enables RALPH evolution to modulate the Hebbian learning rate
+/// at runtime. Burst and newcomer multipliers still apply on top of `ltp_base`.
+pub fn apply_stdp_with_ltp<S: std::hash::BuildHasher>(
+    network: &mut CouplingNetwork,
+    spheres: &HashMap<PaneId, PaneSphere, S>,
+    ltp_base: f64,
+) -> StdpResult {
     let mut result = StdpResult::default();
 
     // Identify working spheres (co-active candidates)
@@ -90,8 +102,8 @@ pub fn apply_stdp<S: std::hash::BuildHasher>(
             let either_working = from_working || to_working;
 
             let weight_delta = if both_working {
-                // LTP: co-active pair
-                let mut ltp = m04_constants::HEBBIAN_LTP;
+                // LTP: co-active pair (Session 076: use RALPH-tuned base rate)
+                let mut ltp = ltp_base;
 
                 // Burst detection: boost if sphere has high short-term activity
                 if from_sphere.activity_30s > 3 || to_sphere.activity_30s > 3 {
@@ -177,6 +189,38 @@ pub fn decay_all_weights(network: &mut CouplingNetwork, decay_factor: f64) {
     let updates: Vec<(PaneId, PaneId, f64)> = network
         .connections
         .iter()
+        .map(|c| {
+            let new_w = (c.weight * factor).max(m04_constants::HEBBIAN_WEIGHT_FLOOR);
+            (c.from.clone(), c.to.clone(), new_w)
+        })
+        .collect();
+
+    for (from, to, w) in &updates {
+        network.set_weight(from, to, *w);
+    }
+}
+
+/// Decay only connections whose endpoints exist in the sphere set.
+///
+/// `decay_all_weights` decays every connection universally, but
+/// `apply_stdp` only applies LTP/LTD to connections whose endpoints
+/// are in the sphere map. This asymmetry causes connections between
+/// stale/unknown sphere IDs to receive decay without any LTP,
+/// collapsing 80%+ of weights to the floor.
+///
+/// This function restores symmetry: connections that cannot receive
+/// STDP updates also skip decay. They will be removed by the
+/// coupling pruner instead of silently driven to floor.
+pub fn decay_active_weights<S: std::hash::BuildHasher>(
+    network: &mut CouplingNetwork,
+    spheres: &HashMap<PaneId, PaneSphere, S>,
+    decay_factor: f64,
+) {
+    let factor = decay_factor.clamp(0.0, 1.0);
+    let updates: Vec<(PaneId, PaneId, f64)> = network
+        .connections
+        .iter()
+        .filter(|c| spheres.contains_key(&c.from) || spheres.contains_key(&c.to))
         .map(|c| {
             let new_w = (c.weight * factor).max(m04_constants::HEBBIAN_WEIGHT_FLOOR);
             (c.from.clone(), c.to.clone(), new_w)
@@ -502,6 +546,80 @@ mod tests {
         net.register(pid("b"), 1.0, 0.1);
         net.set_weight(&pid("a"), &pid("b"), 0.7);
         decay_all_weights(&mut net, 1.0);
+        let w = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        assert_relative_eq!(w, 0.7, epsilon = 1e-10);
+    }
+
+    // ── decay_active_weights ──
+
+    #[test]
+    fn decay_active_skips_unknown_spheres() {
+        let mut net = CouplingNetwork::new();
+        net.register(pid("a"), 0.0, 0.1);
+        net.register(pid("b"), 1.0, 0.1);
+        net.register(pid("stale"), 2.0, 0.1);
+        net.set_weight(&pid("a"), &pid("b"), 0.6);
+        net.set_weight(&pid("a"), &pid("stale"), 0.6);
+
+        // Only "a" and "b" in the sphere set — "stale" is absent
+        let mut spheres = HashMap::new();
+        spheres.insert(pid("a"), working_sphere("a"));
+        spheres.insert(pid("b"), working_sphere("b"));
+
+        decay_active_weights(&mut net, &spheres, 0.9);
+
+        // a↔b: both in sphere set → decayed
+        let w_ab = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        assert!(w_ab < 0.6, "known connection should decay");
+
+        // a↔stale: "a" is in set so this connection IS decayed
+        // (filter is: from OR to in spheres)
+        let w_as = net.get_weight(&pid("a"), &pid("stale")).unwrap();
+        assert!(w_as < 0.6, "connection with one known endpoint should decay");
+    }
+
+    #[test]
+    fn decay_active_preserves_fully_stale() {
+        let mut net = CouplingNetwork::new();
+        net.register(pid("old_a"), 0.0, 0.1);
+        net.register(pid("old_b"), 1.0, 0.1);
+        net.set_weight(&pid("old_a"), &pid("old_b"), 0.5);
+
+        // Empty sphere set — no known spheres
+        let spheres: HashMap<PaneId, PaneSphere> = HashMap::new();
+        decay_active_weights(&mut net, &spheres, 0.5);
+
+        // Neither endpoint in sphere set → untouched
+        let w = net.get_weight(&pid("old_a"), &pid("old_b")).unwrap();
+        assert_relative_eq!(w, 0.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn decay_active_respects_floor() {
+        let mut net = CouplingNetwork::new();
+        net.register(pid("a"), 0.0, 0.1);
+        net.register(pid("b"), 1.0, 0.1);
+        let mut spheres = HashMap::new();
+        spheres.insert(pid("a"), working_sphere("a"));
+        spheres.insert(pid("b"), working_sphere("b"));
+
+        // Aggressive decay — should clamp to floor
+        decay_active_weights(&mut net, &spheres, 0.0);
+        let w = net.get_weight(&pid("a"), &pid("b")).unwrap();
+        assert!(w >= m04_constants::HEBBIAN_WEIGHT_FLOOR - 1e-10);
+    }
+
+    #[test]
+    fn decay_active_factor_one_no_change() {
+        let mut net = CouplingNetwork::new();
+        net.register(pid("a"), 0.0, 0.1);
+        net.register(pid("b"), 1.0, 0.1);
+        net.set_weight(&pid("a"), &pid("b"), 0.7);
+        let mut spheres = HashMap::new();
+        spheres.insert(pid("a"), working_sphere("a"));
+        spheres.insert(pid("b"), working_sphere("b"));
+
+        decay_active_weights(&mut net, &spheres, 1.0);
         let w = net.get_weight(&pid("a"), &pid("b")).unwrap();
         assert_relative_eq!(w, 0.7, epsilon = 1e-10);
     }

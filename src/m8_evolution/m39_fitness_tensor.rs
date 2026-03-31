@@ -39,19 +39,51 @@ use crate::m1_core::m02_error_handling::{PvError, PvResult};
 /// Number of fitness dimensions.
 pub const DIMENSION_COUNT: usize = 12;
 
+/// Session 073 (BUG-073): Rolling mean window for volatile fitness dimensions.
+/// At 5s RALPH ticks, 6 samples = 30 seconds — spans one full SYNTHEX thermal
+/// PID cycle (30-60s) and absorbs PV2 `field_r` oscillations.
+const SMOOTHING_WINDOW: usize = 6;
+
+/// Dimensions that use rolling-mean smoothing because their raw values
+/// swing ±0.055 per tick from volatile external services.
+/// D1 (`field_coherence`): PV2 Kuramoto r (0.70-0.98 swing).
+/// D5 (`latency`): SYNTHEX convergence freshness (binary 0/1 on breaker).
+/// D8 (`thermal_balance`): SYNTHEX `delta(temp-target)` (PID oscillation).
+const VOLATILE_DIMENSIONS: [bool; DIMENSION_COUNT] = [
+    false, // D0  coordination_quality
+    true,  // D1  field_coherence     ← volatile (PV2 r)
+    false, // D2  dispatch_accuracy
+    false, // D3  task_throughput
+    false, // D4  error_rate
+    true,  // D5  latency             ← volatile (SYNTHEX)
+    false, // D6  hebbian_health
+    false, // D7  coupling_stability
+    true,  // D8  thermal_balance     ← volatile (SYNTHEX PID)
+    false, // D9  fleet_utilization
+    false, // D10 emergence_rate
+    false, // D11 consent_compliance
+];
+
 /// Dimension weights for ORAC fleet coordination fitness scoring.
 /// Sum = 1.0.
+///
+/// Session-073 reweight: Boost learning dimensions (D6, D7) at the expense of
+/// `field_coherence` (D1) and `thermal_balance` (D8). With r oscillating 0.5-1.0
+/// naturally, `field_coherence` was over-weighted — RALPH optimized for r at the
+/// expense of STDP learning. `thermal_balance` is structurally uncontrollable
+/// (BUG-073-D), so its weight is reduced. D9 absorbs 0.01 residual to keep
+/// sum exactly 1.0.
 pub const DIMENSION_WEIGHTS: [f64; DIMENSION_COUNT] = [
     0.18, // D0: coordination_quality (PRIMARY)
-    0.15, // D1: field_coherence (PRIMARY)
+    0.10, // D1: field_coherence (PRIMARY) — was 0.15, reduced: r oscillates naturally
     0.12, // D2: dispatch_accuracy (PRIMARY)
     0.10, // D3: task_throughput (SECONDARY)
     0.10, // D4: error_rate (SECONDARY, inverted: lower=better)
     0.08, // D5: latency (SECONDARY, inverted: lower=better)
-    0.07, // D6: hebbian_health (LEARNING)
-    0.06, // D7: coupling_stability (LEARNING)
-    0.05, // D8: thermal_balance (CONTEXT)
-    0.04, // D9: fleet_utilization (CONTEXT)
+    0.10, // D6: hebbian_health (LEARNING) — was 0.07, boosted: STDP is core to evolution
+    0.09, // D7: coupling_stability (LEARNING) — was 0.06, boosted: weight differentiation matters
+    0.03, // D8: thermal_balance (CONTEXT) — was 0.05, reduced: PID can't reach target (BUG-073-D)
+    0.05, // D9: fleet_utilization (CONTEXT) — was 0.04, absorbs 0.01 residual
     0.03, // D10: emergence_rate (CONTEXT)
     0.02, // D11: consent_compliance (CONTEXT)
 ];
@@ -446,6 +478,10 @@ pub struct FitnessTensor {
     config: FitnessTensorConfig,
     /// Aggregate statistics.
     stats: RwLock<FitnessTensorStats>,
+    /// Session 073: Rolling mean buffers for volatile dimensions (D1, D5, D8).
+    /// Each buffer holds up to [`SMOOTHING_WINDOW`] recent raw values.
+    /// Non-volatile dimensions have empty buffers (never written to).
+    volatile_buffers: RwLock<[VecDeque<f64>; DIMENSION_COUNT]>,
 }
 
 impl fmt::Debug for FitnessTensor {
@@ -468,6 +504,15 @@ impl FitnessTensor {
     #[must_use]
     pub fn with_config(config: FitnessTensorConfig) -> Self {
         let weights = config.custom_weights.unwrap_or(DIMENSION_WEIGHTS);
+        // Initialise per-dimension smoothing buffers. Only volatile dimensions
+        // will be populated; the rest stay at capacity 0 (zero allocations).
+        let buffers: [VecDeque<f64>; DIMENSION_COUNT] = std::array::from_fn(|i| {
+            if VOLATILE_DIMENSIONS[i] {
+                VecDeque::with_capacity(SMOOTHING_WINDOW)
+            } else {
+                VecDeque::new()
+            }
+        });
         Self {
             history: RwLock::new(VecDeque::with_capacity(
                 config.history_capacity.min(1024),
@@ -478,6 +523,7 @@ impl FitnessTensor {
                 trough_fitness: f64::MAX,
                 ..FitnessTensorStats::default()
             }),
+            volatile_buffers: RwLock::new(buffers),
         }
     }
 
@@ -533,10 +579,34 @@ impl FitnessTensor {
     pub fn evaluate(&self, tensor: &TensorValues, tick: u64, generation: Option<u64>) -> PvResult<FitnessReport> {
         tensor.validate()?;
 
+        // Session 073: Smooth volatile dimensions through rolling mean buffers.
+        // Raw values are pushed into per-dimension ring buffers; the weighted sum
+        // uses the buffer mean instead of the instantaneous value. Non-volatile
+        // dimensions bypass the buffer entirely (empty VecDeque → no overhead).
+        let smoothed = {
+            let mut bufs = self.volatile_buffers.write();
+            let mut vals = tensor.values;
+            for (i, buf) in bufs.iter_mut().enumerate() {
+                if !VOLATILE_DIMENSIONS[i] {
+                    continue;
+                }
+                if buf.len() >= SMOOTHING_WINDOW {
+                    buf.pop_front();
+                }
+                buf.push_back(vals[i]);
+                if !buf.is_empty() {
+                    #[allow(clippy::cast_precision_loss)]
+                    let n = buf.len() as f64;
+                    vals[i] = buf.iter().sum::<f64>() / n;
+                }
+            }
+            vals
+        };
+
         let mut weighted = [0.0_f64; DIMENSION_COUNT];
         let mut overall = 0.0_f64;
         for (i, w) in weighted.iter_mut().enumerate() {
-            *w = tensor.values[i] * self.weights[i];
+            *w = smoothed[i] * self.weights[i];
             overall += *w;
         }
 
@@ -1067,10 +1137,17 @@ mod tests {
     #[test]
     fn fitness_delta_existing_ticks() {
         let ft = FitnessTensor::new();
-        ft.evaluate(&TensorValues::uniform(0.5), 10, None).unwrap();
-        ft.evaluate(&TensorValues::uniform(0.8), 20, None).unwrap();
+        // Session 073: Prime buffers so volatile means converge fully.
+        for tick in 10..10 + SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.5), tick, None).unwrap();
+        }
+        for tick in 20..20 + SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.8), tick, None).unwrap();
+        }
 
-        let delta = ft.fitness_delta(10, 20).unwrap();
+        let first_tick = 10 + SMOOTHING_WINDOW as u64 - 1;
+        let second_tick = 20 + SMOOTHING_WINDOW as u64 - 1;
+        let delta = ft.fitness_delta(first_tick, second_tick).unwrap();
         assert!((delta - 0.3).abs() < 0.001);
     }
 
@@ -1104,8 +1181,11 @@ mod tests {
     #[test]
     fn current_fitness_returns_latest() {
         let ft = FitnessTensor::new();
-        ft.evaluate(&TensorValues::uniform(0.5), 1, None).unwrap();
-        ft.evaluate(&TensorValues::uniform(0.7), 2, None).unwrap();
+        // Prime volatile smoothing buffers with the target value so the
+        // rolling mean converges before asserting (Session 073 smoothing).
+        for tick in 1..=SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.7), tick, None).unwrap();
+        }
         let fitness = ft.current_fitness().unwrap();
         assert!((fitness - 0.7).abs() < 0.001);
     }
@@ -1113,12 +1193,21 @@ mod tests {
     #[test]
     fn stats_updated() {
         let ft = FitnessTensor::new();
-        ft.evaluate(&TensorValues::uniform(0.3), 1, None).unwrap();
-        ft.evaluate(&TensorValues::uniform(0.9), 2, None).unwrap();
-        ft.evaluate(&TensorValues::uniform(0.6), 3, None).unwrap();
+        // Session 073: Prime smoothing buffers with each target value so
+        // volatile dimension means converge to the exact value.
+        for tick in 1..=SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.3), tick, None).unwrap();
+        }
+        let base_tick = SMOOTHING_WINDOW as u64;
+        for tick in 1..=SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.9), base_tick + tick, None).unwrap();
+        }
+        for tick in 1..=SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.6), base_tick * 2 + tick, None).unwrap();
+        }
 
         let stats = ft.stats();
-        assert_eq!(stats.total_evaluations, 3);
+        assert_eq!(stats.total_evaluations, SMOOTHING_WINDOW as u64 * 3);
         assert!((stats.peak_fitness - 0.9).abs() < 0.001);
         assert!((stats.trough_fitness - 0.3).abs() < 0.001);
         assert!((stats.current_fitness - 0.6).abs() < 0.001);
@@ -1293,11 +1382,13 @@ mod tests {
     #[test]
     fn latest_snapshot_returns_last() {
         let ft = FitnessTensor::new();
-        ft.evaluate(&TensorValues::uniform(0.3), 10, Some(1)).unwrap();
-        ft.evaluate(&TensorValues::uniform(0.7), 20, Some(2)).unwrap();
+        // Session 073: Prime smoothing buffers with 0.7 so volatile means converge.
+        for tick in 1..=SMOOTHING_WINDOW as u64 {
+            ft.evaluate(&TensorValues::uniform(0.7), tick, Some(2)).unwrap();
+        }
 
         let snap = ft.latest_snapshot().unwrap();
-        assert_eq!(snap.tick, 20);
+        assert_eq!(snap.tick, SMOOTHING_WINDOW as u64);
         assert_eq!(snap.generation, Some(2));
         assert!((snap.fitness - 0.7).abs() < 0.001);
     }

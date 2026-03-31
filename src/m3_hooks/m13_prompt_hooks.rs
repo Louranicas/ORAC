@@ -83,7 +83,7 @@ pub async fn handle_user_prompt_submit(
     // Fetch thermal, tasks, and POVM memories live (not cached by poller)
     let thermal_url = format!("{}/v3/thermal", state.synthex_url);
     let tasks_url = format!("{}/bus/tasks", state.pv2_url);
-    let povm_url = format!("{}/memories?limit=3", state.povm_url);
+    let povm_url = format!("{}/memories?limit=5", state.povm_url);
 
     #[cfg(feature = "intelligence")]
     let pv2_blocked = !state.breaker_allows("pv2");
@@ -122,17 +122,43 @@ pub async fn handle_user_prompt_submit(
     // Read blackboard fleet summary (fast local SQLite, no HTTP)
     let bb_summary = read_blackboard_summary(&state);
 
+    // Session 075 BREAK-4: Inject emergence + RALPH state into CC context.
+    // Fleet CCs gain ecosystem awareness — they can see recent emergence
+    // events and RALPH mutation effectiveness.
+    let emergence_context = {
+        #[cfg(feature = "evolution")]
+        {
+            let ralph = &state.ralph;
+            let recent = ralph.emergence().recent(3);
+            let ralph_state = ralph.state();
+            let gen = ralph_state.generation;
+            let fit = ralph_state.current_fitness;
+            let mut parts = Vec::new();
+            if !recent.is_empty() {
+                let emergence_str: String = recent.iter()
+                    .map(|e| format!("{:?}(tick {})", e.emergence_type, e.detected_at_tick))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("[EMERGENCE] {emergence_str}"));
+            }
+            parts.push(format!("[RALPH] gen={gen} fitness={fit:.3}"));
+            format!("\n{}", parts.join("\n"))
+        }
+        #[cfg(not(feature = "evolution"))]
+        { String::new() }
+    };
+
     // Build system message
     let message = if pending_count > 0 {
         format!(
             "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}\n\
              {povm_context}\
              [FLEET TASK AVAILABLE] {pending_count} pending. First: {first_task}\n\
-             To claim: pane-vortex-client claim {first_task_id} — then work on it. Include TASK_COMPLETE when done."
+             To claim: pane-vortex-client claim {first_task_id} — then work on it. Include TASK_COMPLETE when done.{emergence_context}"
         )
     } else {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}{povm_context} | No pending fleet tasks"
+            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}{povm_context} | No pending fleet tasks{emergence_context}"
         )
     };
 
@@ -259,9 +285,9 @@ fn parse_pending_tasks(data: Option<&str>) -> (usize, String, String) {
     (count, desc, id)
 }
 
-/// Parse POVM `/memories?limit=3` response into a compact context line.
+/// Parse POVM `/memories?limit=5` response into a compact context line.
 ///
-/// Returns a string like `\n[POVM] 3 memories: "Session 027: ..." | "Session 028: ..."`.
+/// Returns a string like `\n[POVM] 5 memories: "Session 027: ..." | "Session 028: ..."`.
 /// Returns empty string if POVM is unreachable or has no memories.
 fn parse_povm_memories(data: Option<&str>) -> String {
     let Some(data) = data else {

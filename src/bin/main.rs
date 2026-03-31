@@ -11,7 +11,7 @@ use orac_sidecar::m2_wire::m07_ipc_client::IpcClient;
 use orac_sidecar::m2_wire::m08_bus_types::{BusEvent, BusFrame};
 
 #[cfg(all(feature = "intelligence", feature = "evolution"))]
-use orac_sidecar::m4_intelligence::m18_hebbian_stdp::{apply_stdp, decay_all_weights};
+use orac_sidecar::m4_intelligence::m18_hebbian_stdp::{apply_stdp_with_ltp, decay_active_weights};
 
 #[cfg(feature = "api")]
 use orac_sidecar::m3_hooks::m10_hook_server::{build_router, spawn_field_poller, OracState};
@@ -68,6 +68,10 @@ async fn main() {
         // Spawn RALPH evolution loop (if feature enabled)
         #[cfg(feature = "evolution")]
         spawn_ralph_loop(Arc::clone(&state), halt_recv);
+
+        // Spawn blackboard GC on a separate interval (decoupled from RALPH tick)
+        #[cfg(feature = "persistence")]
+        spawn_blackboard_gc(Arc::clone(&state));
 
         // Build and start Axum server
         let addr = std::net::SocketAddr::new(
@@ -228,6 +232,55 @@ fn hydrate_startup_state(state: &OracState) {
 
 /// Spawn the IPC client as a background task (BUG-041 fix).
 ///
+/// Background blackboard GC — runs every 5 minutes on its own `tokio` task.
+///
+/// Decoupled from the RALPH tick loop to avoid holding the blackboard
+/// `Mutex` during latency-sensitive evolution ticks. Prunes:
+/// - stale panes (>15 min since last update)
+/// - `hebbian_summary` (keep newest 1,000)
+/// - `consent_audit` (keep newest 500)
+#[cfg(feature = "persistence")]
+fn spawn_blackboard_gc(state: Arc<OracState>) {
+    tokio::spawn(async move {
+        // Offset by 30s so we don't collide with startup hydration
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tracing::info!("Blackboard GC task started (5-minute interval)");
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await; // skip immediate first tick
+
+        loop {
+            interval.tick().await;
+
+            let start = std::time::Instant::now();
+            if let Some(bb) = state.blackboard() {
+                // 15-minute staleness cutoff for panes
+                let cutoff = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f64())
+                    - 900.0;
+                let panes_pruned = bb.prune_stale_panes(cutoff).unwrap_or(0);
+                let hebbian_pruned = bb.prune_hebbian_summaries(1000).unwrap_or(0);
+                let consent_pruned = bb.prune_consent_audit(500).unwrap_or(0);
+                let elapsed_ms = start.elapsed().as_millis();
+
+                if panes_pruned + hebbian_pruned + consent_pruned > 0 {
+                    tracing::info!(
+                        panes_pruned,
+                        hebbian_pruned,
+                        consent_pruned,
+                        elapsed_ms,
+                        "Blackboard GC complete"
+                    );
+                } else {
+                    tracing::debug!(elapsed_ms, "Blackboard GC: nothing to prune");
+                }
+            }
+        }
+    });
+}
+
 /// Connects to the PV2 bus via Unix socket and subscribes to `field.*` and
 /// `sphere.*` events. Updates `OracState.ipc_state` on connect/disconnect.
 /// Runs indefinitely with automatic reconnection on failure.
@@ -564,10 +617,14 @@ fn feed_emergence_observations(
     }
 
     // 5. Thermal spike detection (requires SYNTHEX bridge, every 6 ticks)
+    // Session-073 audit: Use 1.5x target as spike threshold. The PID target (0.500)
+    // is structurally unreachable (BUG-073-D), so T>target fires 54% of checks.
+    // At 1.5x (0.750), only genuine overheating fires. Debounce added in detector.
     #[cfg(feature = "bridges")]
     if tick % 6 == 0 {
         if let Some(resp) = state.synthex_bridge.last_response() {
-            if let Err(e) = detector.detect_thermal_spike(resp.temperature, resp.target, tick) {
+            let spike_threshold = resp.target * 1.5;
+            if let Err(e) = detector.detect_thermal_spike(resp.temperature, spike_threshold, tick) {
                 tracing::debug!("Emergence thermal_spike check error: {e}");
             }
         }
@@ -991,6 +1048,54 @@ fn trigger_povm_consolidation(state: &OracState, tick: u64) {
 
 /// Hydrate top POVM memories into blackboard `povm_context` table (Session 066).
 ///
+/// Session 076: Bridge RALPH-accepted mutation values to runtime parameters.
+///
+/// Reads each registered parameter from `RalphEngine.selector().get_parameter()`
+/// and writes to the corresponding `AtomicU64` on `OracState`. Runtime consumers
+/// (STDP, decay, coupling) read these atomics instead of compile-time constants.
+///
+/// For `k_mod`, the RALPH value is stored as a baseline that gets multiplied by
+/// the SYNTHEX thermal adjustment. This preserves SYNTHEX's real-time modulation
+/// while letting RALPH steer the operating point.
+#[cfg(feature = "evolution")]
+fn apply_ralph_mutations(state: &OracState) {
+    let selector = state.ralph.selector();
+
+    if let Some(p) = selector.get_parameter("k_mod") {
+        state
+            .ralph_k_mod
+            .store(p.current_value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    if let Some(p) = selector.get_parameter("hebbian_ltp") {
+        state
+            .ralph_hebbian_ltp
+            .store(p.current_value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    if let Some(p) = selector.get_parameter("decay_rate") {
+        state
+            .ralph_decay_rate
+            .store(p.current_value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // r_target: Write to AppState governance override so the Conductor uses it.
+    if let Some(p) = selector.get_parameter("r_target") {
+        state.field_state.write().r_target_override = Some(p.current_value);
+    }
+
+    // tick_interval: Store as milliseconds for the evolution loop to read.
+    // The loop checks this atomic each tick and resets its tokio::Interval
+    // when the value diverges from the current period.
+    if let Some(p) = selector.get_parameter("tick_interval") {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let ms = (p.current_value * 1000.0) as u64;
+        state
+            .ralph_tick_interval_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Every 60 ticks (~300s), fetches memories from POVM sorted by intensity,
 /// then upserts the top 10 into the blackboard for tick-loop access.
 /// ACP-F5: Runs in async context alongside bridge polling, NOT in `tick_once()`.
@@ -1210,34 +1315,21 @@ fn post_state_to_rm(state: &OracState, tick: u64) {
 #[cfg(all(feature = "bridges", feature = "evolution"))]
 fn relay_emergence_to_me(state: &OracState, tick: u64) {
     let recent = state.ralph.emergence().recent(3);
+    let ralph_state = state.ralph.state();
+    let fitness = ralph_state.current_fitness;
+    let field_r = state.field_state.read().field.order.r;
+
     for record in &recent {
         if record.detected_at_tick != tick {
             continue;
         }
-        // Only relay actionable emergence types
-        let hint = match record.emergence_type {
-            EmergenceType::CoherenceLock => "coherence_lock: lower r_target or increase diversity",
-            EmergenceType::ThermalSpike => "thermal_spike: reduce load or cool system",
-            EmergenceType::CouplingRunaway => "coupling_runaway: reduce K modulation",
-            _ => continue,
-        };
-        let body = format!(
-            r#"{{"tool_id":"learning-cycle","params":{{"hint":"{hint}","source":"orac-emergence","tick":{tick}}}}}"#,
-        );
-        let addr = "127.0.0.1:8080";
-        let request = format!(
-            "POST /api/tools/learning-cycle HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len(),
-        );
-        // Fire-and-forget — ME processes asynchronously
-        if let Ok(stream) = std::net::TcpStream::connect_timeout(
-            &addr.parse().unwrap_or_else(|_| std::net::SocketAddr::from(([127,0,0,1], 8080))),
-            std::time::Duration::from_secs(1),
-        ) {
-            use std::io::Write;
-            let mut s = stream;
-            let _ = s.write_all(request.as_bytes());
-            tracing::info!(etype = %record.emergence_type, hint, "Emergence hint relayed to ME");
+        // Session 075 BREAK-2: Post ALL emergence types to ME via bridge.
+        // Uses MeBridge::post_emergence() which hits /api/tools/learning-cycle.
+        let etype = format!("{:?}", record.emergence_type);
+        if let Err(e) = state.me_bridge.post_emergence(&etype, tick, fitness, field_r) {
+            tracing::debug!(etype, "ME emergence relay failed: {e}");
+        } else {
+            tracing::info!(etype, tick, "Emergence relayed to ME");
         }
     }
 }
@@ -1468,6 +1560,9 @@ fn spawn_ralph_loop(
 
         tracing::info!("RALPH evolution loop started (5s interval)");
 
+        // Session 076: Track current interval period so we can detect RALPH changes.
+        let mut current_interval_ms: u64 = 5000;
+
         let mut r_history: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(EMERGENCE_HISTORY_CAP);
         let mut k_history: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(EMERGENCE_HISTORY_CAP);
         let mut monitor_tracking = MonitorTracking::new();
@@ -1529,9 +1624,15 @@ fn spawn_ralph_loop(
                         drop(spheres);
 
                         let spheres = state.field_state.read().spheres.clone();
-                        let stdp_result = apply_stdp(
+                        // Session 076: Use RALPH-tuned LTP rate instead of
+                        // compile-time HEBBIAN_LTP constant.
+                        let ralph_ltp = f64::from_bits(
+                            state.ralph_hebbian_ltp.load(std::sync::atomic::Ordering::Relaxed),
+                        );
+                        let stdp_result = apply_stdp_with_ltp(
                             &mut state.coupling.write(),
                             &spheres,
+                            ralph_ltp,
                         );
                         // GAP-E fix: increment co_activations counter from STDP results
                         if stdp_result.ltp_count > 0 {
@@ -1554,11 +1655,25 @@ fn spawn_ralph_loop(
                             );
                         }
 
-                        // Session 073 BUG-073-C fix: Gentler weight decay to allow
-                        // differentiation. 0.995 was too aggressive — pushed 24/30
-                        // weights to floor. Factor 0.9975 = 0.25% decay per tick.
-                        // Equilibrium shifts from floor back to mid-range (~0.45-0.65).
-                        decay_all_weights(&mut state.coupling.write(), 0.9975);
+                        // Session 073: Selective decay — only decay connections whose
+                        // endpoints exist in the current sphere set. Universal decay
+                        // (decay_all_weights) caused 80%+ of weights to collapse to
+                        // floor because connections between stale sphere IDs receive
+                        // decay but never receive LTP. Factor 0.999 is safe with
+                        // selective decay: active equilibrium = 0.01/0.001 = 10 → ceiling.
+                        {
+                            let spheres_for_decay = state.field_state.read().spheres.clone();
+                            // Session 076: Use RALPH-tuned decay rate instead of
+                            // hardcoded 0.999. RALPH mutates this via "decay_rate" param.
+                            let decay = f64::from_bits(
+                                state.ralph_decay_rate.load(std::sync::atomic::Ordering::Relaxed),
+                            );
+                            decay_active_weights(
+                                &mut state.coupling.write(),
+                                &spheres_for_decay,
+                                decay,
+                            );
+                        }
 
                         if stdp_result.ltp_count > 0 || stdp_result.ltd_count > 0 {
                             // BUG-SCAN-001 fix: record last tick STDP ran for /health
@@ -1707,6 +1822,31 @@ fn spawn_ralph_loop(
                         hydrate_povm_to_blackboard(&state, tick);
                     }
 
+                    // Session 075 HD-3: Read POVM /hydrate for crystallised memory count.
+                    // Crystallised memories are a proxy for mature learning — feed to RALPH
+                    // as a positive fitness signal via emergence detection.
+                    #[cfg(feature = "bridges")]
+                    if tick % 60 == 0 && tick > 0 && state.breaker_allows("povm") {
+                        if let Ok(body) = orac_sidecar::m5_bridges::http_helpers::raw_http_get(
+                            &state.povm_url, "/hydrate", "povm",
+                        ) {
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                                let crystallised = data.get("crystallised_count")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
+                                let pathways = data.get("pathway_count")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
+                                if tick % 300 == 0 {
+                                    tracing::info!(
+                                        crystallised, pathways,
+                                        "POVM hydrate: learning substrate state"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     let tensor = build_tensor_from_state(&state);
 
                     match state.ralph.tick(&tensor, tick) {
@@ -1725,6 +1865,13 @@ fn spawn_ralph_loop(
                             tracing::warn!("RALPH tick error: {e}");
                         }
                     }
+
+                    // Session 076: Bridge RALPH mutations to runtime parameters.
+                    // RALPH proposes mutations via selector.update_value() into its
+                    // internal Vec. This reads accepted values and writes them to the
+                    // AtomicU64 fields on OracState that runtime consumers read.
+                    #[cfg(feature = "evolution")]
+                    apply_ralph_mutations(&state);
 
                     // Session 072: Push RALPH evolution state to SYNTHEX via Nexus Bus.
                     // Gives SYNTHEX real-time visibility into fitness trajectory and
@@ -1946,7 +2093,13 @@ fn spawn_ralph_loop(
                         && state.breaker_allows("synthex")
                     {
                         if let Ok(k_adj) = state.synthex_bridge.poll_thermal() {
-                            state.coupling.write().k_modulation = k_adj;
+                            // Session 076: Blend RALPH k_mod baseline with SYNTHEX
+                            // thermal adjustment. RALPH steers the operating point,
+                            // SYNTHEX modulates around it in real-time.
+                            let ralph_k = f64::from_bits(
+                                state.ralph_k_mod.load(std::sync::atomic::Ordering::Relaxed),
+                            );
+                            state.coupling.write().k_modulation = ralph_k * k_adj;
                             state.synthex_bridge.set_last_poll_tick(tick);
                             #[cfg(feature = "intelligence")]
                             state.breaker_success("synthex");
@@ -1991,6 +2144,26 @@ fn spawn_ralph_loop(
                         }
                     }
 
+                    // Session 075 BREAK-3: Poll ME EventBus stats for learning activity.
+                    // Diffs per-channel event counts to detect ME learning/integration events.
+                    #[cfg(feature = "bridges")]
+                    if tick % 12 == 0 && state.breaker_allows("me") {
+                        match state.me_bridge.poll_eventbus_delta() {
+                            Ok((learning_delta, integration_delta)) => {
+                                if learning_delta > 0 || integration_delta > 0 {
+                                    tracing::info!(
+                                        learning = learning_delta,
+                                        integration = integration_delta,
+                                        "ME EventBus activity detected"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("ME EventBus stats poll failed: {e}");
+                            }
+                        }
+                    }
+
                     // METABOLIC-GAP-6 fix: Persist RALPH state to Reasoning Memory
                     // every 60 ticks as TSV for cross-session persistence.
                     #[cfg(all(feature = "bridges", feature = "evolution"))]
@@ -1998,58 +2171,53 @@ fn spawn_ralph_loop(
                         post_state_to_rm(&state, tick);
                     }
 
-                    // Blackboard hygiene: prune stale pane entries every 60 ticks (~5min).
-                    // Keeps fleet_size accurate and prevents unbounded growth from
-                    // ghost sessions that never deregistered (BUG-059b).
+                    // Blackboard GC moved to spawn_blackboard_gc() background task
+                    // to avoid holding the Mutex in the RALPH tick loop.
+                    // Zombie session pruning stays here (in-memory only, no DB lock).
                     #[cfg(feature = "persistence")]
                     if tick % 60 == 0 && tick > 0 {
-                        if let Some(bb) = state.blackboard() {
-                            // 15-minute staleness cutoff
-                            let cutoff = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0.0, |d| d.as_secs_f64()) - 900.0;
-                            match bb.prune_stale_panes(cutoff) {
-                                Ok(0) => {}
-                                Ok(n) => tracing::info!(pruned = n, "Blackboard: pruned stale panes"),
-                                Err(e) => tracing::debug!("Blackboard prune error: {e}"),
+                        let now_ms = orac_sidecar::m3_hooks::m10_hook_server::epoch_ms();
+                        let one_hour_ms = 3_600_000;
+                        let mut sessions = state.sessions.write();
+                        let stale_ids: Vec<String> = sessions
+                            .iter()
+                            .filter(|(_, t)| {
+                                t.total_tool_calls == 0
+                                    && now_ms.saturating_sub(t.started_ms) > one_hour_ms
+                            })
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                        if !stale_ids.is_empty() {
+                            let count = stale_ids.len();
+                            for id in &stale_ids {
+                                sessions.remove(id);
                             }
-                            // BUG-064q+r fix: Prune unbounded tables every 60 ticks.
-                            // hebbian_summary grows ~14,400 rows/day without pruning.
-                            // consent_audit grows ~2,700 rows/day without pruning.
-                            if let Err(e) = bb.prune_hebbian_summaries(1000) {
-                                tracing::debug!("hebbian_summary prune error: {e}");
-                            }
-                            if let Err(e) = bb.prune_consent_audit(500) {
-                                tracing::debug!("consent_audit prune error: {e}");
-                            }
-
-                            // BUG-064m fix: Prune zombie sessions from in-memory map.
-                            // Sessions from crashed Claude instances (0 tool calls, >1 hour)
-                            // accumulate indefinitely. Remove stale sessions every 60 ticks.
-                            {
-                                let now_ms = orac_sidecar::m3_hooks::m10_hook_server::epoch_ms();
-                                let one_hour_ms = 3_600_000;
-                                let mut sessions = state.sessions.write();
-                                let stale_ids: Vec<String> = sessions
-                                    .iter()
-                                    .filter(|(_, t)| {
-                                        t.total_tool_calls == 0
-                                            && now_ms.saturating_sub(t.started_ms) > one_hour_ms
-                                    })
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-                                if !stale_ids.is_empty() {
-                                    let count = stale_ids.len();
-                                    for id in &stale_ids {
-                                        sessions.remove(id);
-                                    }
-                                    tracing::info!(
-                                        pruned = count,
-                                        "Zombie sessions pruned (0 tools, >1h old)"
-                                    );
-                                }
-                            }
+                            tracing::info!(
+                                pruned = count,
+                                "Zombie sessions pruned (0 tools, >1h old)"
+                            );
                         }
+                    }
+
+                    // Session 076: Dynamically adjust tick interval if RALPH mutated it.
+                    // Read RALPH's proposed tick_interval (stored as ms in AtomicU64)
+                    // and reset the tokio::Interval if it differs from current.
+                    let new_ms = state.ralph_tick_interval_ms.load(
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if new_ms != current_interval_ms && (1000..=30_000).contains(&new_ms) {
+                        interval = tokio::time::interval(
+                            std::time::Duration::from_millis(new_ms),
+                        );
+                        interval.set_missed_tick_behavior(
+                            tokio::time::MissedTickBehavior::Skip,
+                        );
+                        tracing::info!(
+                            old_ms = current_interval_ms,
+                            new_ms,
+                            "RALPH tick interval adjusted",
+                        );
+                        current_interval_ms = new_ms;
                     }
                 }
                 _ = shutdown.changed() => {

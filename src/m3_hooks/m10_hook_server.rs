@@ -510,6 +510,23 @@ pub struct OracState {
     /// Set to `true` after the first successful hydration in the field poller.
     /// Prevents repeated hydration attempts on every poller tick.
     pub coupling_hydrated: AtomicBool,
+
+    // ── RALPH runtime parameter overrides (Session 076) ──
+    // These bridge RALPH mutation proposals to runtime consumption.
+    // Stored as `AtomicU64` via `f64::to_bits` / `f64::from_bits`.
+
+    /// RALPH-tuned Hebbian LTP rate override (default: `HEBBIAN_LTP` = 0.01).
+    /// Read by `apply_stdp` instead of the compile-time constant.
+    pub ralph_hebbian_ltp: AtomicU64,
+    /// RALPH-tuned coupling weight decay rate override (default: 0.999).
+    /// Read by `decay_active_weights` instead of the hardcoded literal.
+    pub ralph_decay_rate: AtomicU64,
+    /// RALPH-tuned coupling K modifier baseline (default: 1.0).
+    /// Blended with SYNTHEX thermal: `effective = ralph_k_mod * synthex_k_adj`.
+    pub ralph_k_mod: AtomicU64,
+    /// RALPH-tuned tick interval in milliseconds (default: 5000).
+    /// Read by the evolution loop to dynamically adjust its own pace.
+    pub ralph_tick_interval_ms: AtomicU64,
 }
 
 impl OracState {
@@ -562,6 +579,12 @@ impl OracState {
             #[cfg(feature = "monitoring")]
             token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant::new(),
             coupling_hydrated: AtomicBool::new(false),
+            ralph_hebbian_ltp: AtomicU64::new(
+                crate::m1_core::m04_constants::HEBBIAN_LTP.to_bits(),
+            ),
+            ralph_decay_rate: AtomicU64::new(0.999_f64.to_bits()),
+            ralph_k_mod: AtomicU64::new(1.0_f64.to_bits()),
+            ralph_tick_interval_ms: AtomicU64::new(5000),
         }
     }
 
@@ -620,6 +643,12 @@ impl OracState {
             #[cfg(feature = "monitoring")]
             token_accountant: crate::m7_monitoring::m35_token_accounting::TokenAccountant::new(),
             coupling_hydrated: AtomicBool::new(false),
+            ralph_hebbian_ltp: AtomicU64::new(
+                crate::m1_core::m04_constants::HEBBIAN_LTP.to_bits(),
+            ),
+            ralph_decay_rate: AtomicU64::new(0.999_f64.to_bits()),
+            ralph_k_mod: AtomicU64::new(1.0_f64.to_bits()),
+            ralph_tick_interval_ms: AtomicU64::new(5000),
         }
     }
 
@@ -1156,6 +1185,12 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                         receptivity: f64,
                         #[serde(default)]
                         total_steps: u64,
+                        /// Activity count in 30-second window (enables STDP burst detection).
+                        #[serde(default)]
+                        activity_30s: u32,
+                        /// Whether this sphere has ever done work.
+                        #[serde(default)]
+                        has_worked: bool,
                     }
 
                     impl PvSphereCompact {
@@ -1167,6 +1202,15 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                                 "Complete" | "complete" => PaneStatus::Complete,
                                 _ => PaneStatus::Idle,
                             };
+                            // Session 076: Use `has_worked` to back-fill `total_steps`
+                            // when PV2 reports 0 steps but the sphere has previously
+                            // done work. This prevents STDP G3 from treating ex-workers
+                            // as phantom spheres (Session 070 LTD-zero root cause).
+                            let steps = if self.total_steps == 0 && self.has_worked {
+                                1
+                            } else {
+                                self.total_steps
+                            };
                             PaneSphere {
                                 id: PaneId::new(&self.id),
                                 persona: self.persona,
@@ -1174,7 +1218,8 @@ pub fn spawn_field_poller(state: Arc<OracState>) {
                                 phase: self.phase,
                                 frequency: self.frequency,
                                 receptivity: self.receptivity.max(0.01),
-                                total_steps: self.total_steps,
+                                total_steps: steps,
+                                activity_30s: self.activity_30s as usize,
                                 ..PaneSphere::default()
                             }
                         }
