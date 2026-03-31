@@ -396,6 +396,30 @@ pub struct HealthResponse {
     /// T5: Whether RM bridge data is stale.
     #[cfg(feature = "bridges")]
     pub rm_stale: bool,
+
+    // ── Session 075: Honest health metrics ──
+
+    /// Whether the system is ACTUALLY learning (not just running).
+    /// True when: coupling weights above floor AND LTD > 0 AND emergence firing.
+    /// False means "alive but dormant" — the old /health "healthy" was a lie.
+    pub learning_active: bool,
+
+    /// ME `EventBus` learning channel events consumed by ORAC.
+    /// 0 = ORAC not listening to ME. >0 = bidirectional loop active.
+    #[cfg(feature = "bridges")]
+    pub me_eventbus_learning: u64,
+
+    /// ME `EventBus` integration channel events consumed by ORAC.
+    #[cfg(feature = "bridges")]
+    pub me_eventbus_integration: u64,
+
+    /// Composite system health grade (S/A/B/C/D).
+    /// S: learning + fitness > 0.8 + weights differentiated
+    /// A: learning + fitness > 0.6
+    /// B: alive + some learning signals
+    /// C: alive but dormant
+    /// D: degraded
+    pub system_grade: &'static str,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1608,6 +1632,64 @@ async fn health_handler(
         synthex_stale: state.synthex_bridge.last_response().is_none(),
         #[cfg(feature = "bridges")]
         rm_stale: false, // RM has no poll state; always considered fresh if reachable
+
+        // Session 075: Honest health — is the system ACTUALLY learning?
+        learning_active: {
+            #[cfg(feature = "intelligence")]
+            {
+                let ltp = state.hebbian_ltp_total.load(Ordering::Relaxed);
+                let ltd = state.hebbian_ltd_total.load(Ordering::Relaxed);
+                let w_mean = {
+                    let conns = &state.coupling.read().connections;
+                    if conns.is_empty() { 0.0 }
+                    else {
+                        #[allow(clippy::cast_precision_loss)]
+                        { conns.iter().map(|c| c.weight).sum::<f64>() / conns.len() as f64 }
+                    }
+                };
+                // Learning is active when: weights above floor OR LTD firing OR LTP firing
+                w_mean > 0.16 || ltd > 0 || ltp > 0
+            }
+            #[cfg(not(feature = "intelligence"))]
+            { false }
+        },
+
+        #[cfg(feature = "bridges")]
+        me_eventbus_learning: {
+            let s = state.me_bridge.state_snapshot();
+            s.me_learning_events
+        },
+        #[cfg(feature = "bridges")]
+        me_eventbus_integration: {
+            let s = state.me_bridge.state_snapshot();
+            s.me_integration_events
+        },
+
+        system_grade: {
+            #[cfg(all(feature = "intelligence", feature = "evolution"))]
+            {
+                let fitness = ralph_state.current_fitness;
+                let ltp = state.hebbian_ltp_total.load(Ordering::Relaxed);
+                let ltd = state.hebbian_ltd_total.load(Ordering::Relaxed);
+                let w_mean = {
+                    let conns = &state.coupling.read().connections;
+                    if conns.is_empty() { 0.0 }
+                    else {
+                        #[allow(clippy::cast_precision_loss)]
+                        { conns.iter().map(|c| c.weight).sum::<f64>() / conns.len() as f64 }
+                    }
+                };
+                let learning = ltd > 0 || ltp > 0;
+                let differentiated = w_mean > 0.20;
+                if learning && differentiated && fitness > 0.8 { "S" }
+                else if learning && fitness > 0.6 { "A" }
+                else if learning || ltd > 0 { "B" }
+                else if fitness > 0.3 { "C" }
+                else { "D" }
+            }
+            #[cfg(not(all(feature = "intelligence", feature = "evolution")))]
+            { "C" }
+        },
     })
 }
 
@@ -2790,6 +2872,12 @@ mod tests {
             synthex_stale: false,
             #[cfg(feature = "bridges")]
             rm_stale: false,
+            learning_active: false,
+            #[cfg(feature = "bridges")]
+            me_eventbus_learning: 0,
+            #[cfg(feature = "bridges")]
+            me_eventbus_integration: 0,
+            system_grade: "C",
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("orac-sidecar"));
@@ -2851,6 +2939,12 @@ mod tests {
             synthex_stale: false,
             #[cfg(feature = "bridges")]
             rm_stale: false,
+            learning_active: false,
+            #[cfg(feature = "bridges")]
+            me_eventbus_learning: 0,
+            #[cfg(feature = "bridges")]
+            me_eventbus_integration: 0,
+            system_grade: "C",
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("ralph_gen"));

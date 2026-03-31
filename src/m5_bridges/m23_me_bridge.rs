@@ -207,9 +207,9 @@ struct BridgeState {
     last_response: Option<ObserverResponse>,
     /// Successful poll count (observer subscription proxy).
     successful_polls: u64,
-    /// Last-seen ME EventBus learning channel count (Session 075 BREAK-3).
+    /// Last-seen ME `EventBus` learning channel count (Session 075 BREAK-3).
     me_learning_events: u64,
-    /// Last-seen ME EventBus integration channel count (Session 075 BREAK-3).
+    /// Last-seen ME `EventBus` integration channel count (Session 075 BREAK-3).
     me_integration_events: u64,
 }
 
@@ -234,6 +234,15 @@ impl Default for BridgeState {
 // ──────────────────────────────────────────────────────────────
 // MeBridge
 // ──────────────────────────────────────────────────────────────
+
+/// Snapshot of ME bridge state for health endpoint reporting.
+#[derive(Debug, Clone)]
+pub struct BridgeStateSnapshot {
+    /// ME `EventBus` learning channel events seen.
+    pub me_learning_events: u64,
+    /// ME `EventBus` integration channel events seen.
+    pub me_integration_events: u64,
+}
 
 /// Bridge to the Maintenance Engine for fitness-based coupling modulation.
 ///
@@ -317,6 +326,16 @@ impl MeBridge {
     #[must_use]
     pub fn is_subscribed(&self) -> bool {
         self.state.read().successful_polls > 0
+    }
+
+    /// Return a snapshot of the bridge state for health reporting.
+    #[must_use]
+    pub fn state_snapshot(&self) -> BridgeStateSnapshot {
+        let s = self.state.read();
+        BridgeStateSnapshot {
+            me_learning_events: s.me_learning_events,
+            me_integration_events: s.me_integration_events,
+        }
     }
 
     /// Return the number of successful observer polls.
@@ -557,6 +576,7 @@ impl MeBridge {
         fitness: f64,
         field_r: f64,
     ) -> PvResult<()> {
+        use crate::m1_core::m05_traits::Bridgeable;
         let payload = serde_json::json!({
             "source": "orac-sidecar",
             "event_type": "emergence",
@@ -565,7 +585,6 @@ impl MeBridge {
             "fitness": fitness,
             "field_r": field_r,
         });
-        use crate::m1_core::m05_traits::Bridgeable;
         self.post(payload.to_string().as_bytes())
     }
 

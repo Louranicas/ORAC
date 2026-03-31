@@ -31,6 +31,7 @@ const MIN_PROMPT_LENGTH: usize = 20;
 /// 3. Fetches thermal state from SYNTHEX (live)
 /// 4. Checks for pending bus tasks (live PV2 call)
 /// 5. Returns field state + task info as `systemMessage`
+#[allow(clippy::too_many_lines)]
 pub async fn handle_user_prompt_submit(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
