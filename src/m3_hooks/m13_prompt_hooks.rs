@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 
 use super::m10_hook_server::{http_get, HookEvent, HookResponse, OracState};
@@ -33,11 +34,11 @@ const MIN_PROMPT_LENGTH: usize = 20;
 pub async fn handle_user_prompt_submit(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     // Skip short prompts
     let prompt = event.prompt.as_deref().unwrap_or("");
     if prompt.len() < MIN_PROMPT_LENGTH {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     }
 
     // Advance breaker tick
@@ -56,8 +57,12 @@ pub async fn handle_user_prompt_submit(
                 #[allow(clippy::cast_precision_loss)]
                 let now_secs = super::m10_hook_server::epoch_ms() as f64 / 1000.0;
                 let twenty_four_hours_ago = now_secs - 86_400.0;
-                let _ = bb.prune_complete_panes(twenty_four_hours_ago);
-                let _ = bb.prune_old_tasks(twenty_four_hours_ago);
+                if let Err(e) = bb.prune_complete_panes(twenty_four_hours_ago) {
+                    tracing::warn!("blackboard prune_complete_panes failed: {e}");
+                }
+                if let Err(e) = bb.prune_old_tasks(twenty_four_hours_ago) {
+                    tracing::warn!("blackboard prune_old_tasks failed: {e}");
+                }
             }
         }
     }
@@ -75,23 +80,28 @@ pub async fn handle_user_prompt_submit(
         )
     };
 
-    // Fetch thermal and tasks live (not cached by poller)
+    // Fetch thermal, tasks, and POVM memories live (not cached by poller)
     let thermal_url = format!("{}/v3/thermal", state.synthex_url);
     let tasks_url = format!("{}/bus/tasks", state.pv2_url);
+    let povm_url = format!("{}/memories?limit=3", state.povm_url);
 
     #[cfg(feature = "intelligence")]
     let pv2_blocked = !state.breaker_allows("pv2");
     #[cfg(not(feature = "intelligence"))]
     let pv2_blocked = false;
 
-    let (thermal_data, tasks_data) = if pv2_blocked {
+    let (thermal_data, tasks_data, povm_data) = if pv2_blocked {
         // PV2 breaker blocked — skip tasks call (BUG-L3-001 rename)
-        let thermal = http_get(&thermal_url, 1000).await;
-        (thermal, None)
+        let (thermal, povm) = tokio::join!(
+            http_get(&thermal_url, 1000),
+            http_get(&povm_url, 1000),
+        );
+        (thermal, None, povm)
     } else {
-        let (th, tk) = tokio::join!(
+        let (th, tk, pv) = tokio::join!(
             http_get(&thermal_url, 1000),
             http_get(&tasks_url, 1000),
+            http_get(&povm_url, 1000),
         );
         // Record PV2 breaker outcome (tasks endpoint)
         #[cfg(feature = "intelligence")]
@@ -100,10 +110,11 @@ pub async fn handle_user_prompt_submit(
         } else {
             state.breaker_failure("pv2");
         }
-        (th, tk)
+        (th, tk, pv)
     };
 
     let thermal = parse_temperature(thermal_data.as_deref());
+    let povm_context = parse_povm_memories(povm_data.as_deref());
 
     // Check for pending tasks
     let (pending_count, first_task, first_task_id) = parse_pending_tasks(tasks_data.as_deref());
@@ -115,16 +126,17 @@ pub async fn handle_user_prompt_submit(
     let message = if pending_count > 0 {
         format!(
             "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}\n\
+             {povm_context}\
              [FLEET TASK AVAILABLE] {pending_count} pending. First: {first_task}\n\
              To claim: pane-vortex-client claim {first_task_id} — then work on it. Include TASK_COMPLETE when done."
         )
     } else {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary} | No pending fleet tasks"
+            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}{povm_context} | No pending fleet tasks"
         )
     };
 
-    Json(HookResponse::with_message(message))
+    (StatusCode::OK, Json(HookResponse::with_message(message)))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -245,6 +257,39 @@ fn parse_pending_tasks(data: Option<&str>) -> (usize, String, String) {
         .to_owned();
 
     (count, desc, id)
+}
+
+/// Parse POVM `/memories?limit=3` response into a compact context line.
+///
+/// Returns a string like `\n[POVM] 3 memories: "Session 027: ..." | "Session 028: ..."`.
+/// Returns empty string if POVM is unreachable or has no memories.
+fn parse_povm_memories(data: Option<&str>) -> String {
+    let Some(data) = data else {
+        return String::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(data) else {
+        return String::new();
+    };
+    if parsed.is_empty() {
+        return String::new();
+    }
+    let summaries: Vec<String> = parsed
+        .iter()
+        .filter_map(|m| {
+            let content = m.get("content").and_then(serde_json::Value::as_str)?;
+            // Truncate to 80 chars for prompt budget
+            let truncated = if content.len() > 80 {
+                format!("{}...", &content[..77])
+            } else {
+                content.to_owned()
+            };
+            Some(format!("\"{truncated}\""))
+        })
+        .collect();
+    if summaries.is_empty() {
+        return String::new();
+    }
+    format!("\n[POVM] {} memories: {}", summaries.len(), summaries.join(" | "))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -388,6 +433,63 @@ mod tests {
     fn pending_tasks_invalid_json() {
         let (c, _, _) = parse_pending_tasks(Some("not json"));
         assert_eq!(c, 0);
+    }
+
+    // ── parse_povm_memories ──
+
+    #[test]
+    fn povm_memories_none() {
+        assert_eq!(parse_povm_memories(None), "");
+    }
+
+    #[test]
+    fn povm_memories_empty_array() {
+        assert_eq!(parse_povm_memories(Some("[]")), "");
+    }
+
+    #[test]
+    fn povm_memories_invalid_json() {
+        assert_eq!(parse_povm_memories(Some("not json")), "");
+    }
+
+    #[test]
+    fn povm_memories_one() {
+        let data = r#"[{"content":"Session 027: full deploy","id":"abc"}]"#;
+        let result = parse_povm_memories(Some(data));
+        assert!(result.contains("[POVM] 1 memories"));
+        assert!(result.contains("Session 027: full deploy"));
+    }
+
+    #[test]
+    fn povm_memories_truncates_long_content() {
+        let long = "A".repeat(120);
+        let data = format!(r#"[{{"content":"{long}","id":"x"}}]"#);
+        let result = parse_povm_memories(Some(&data));
+        assert!(result.contains("..."));
+        // 77 chars + "..." = 80 max
+        assert!(result.len() < 120);
+    }
+
+    #[test]
+    fn povm_memories_multiple() {
+        let data = r#"[
+            {"content":"First memory","id":"1"},
+            {"content":"Second memory","id":"2"},
+            {"content":"Third memory","id":"3"}
+        ]"#;
+        let result = parse_povm_memories(Some(data));
+        assert!(result.contains("[POVM] 3 memories"));
+        assert!(result.contains("First memory"));
+        assert!(result.contains(" | "));
+        assert!(result.contains("Third memory"));
+    }
+
+    #[test]
+    fn povm_memories_skips_missing_content() {
+        let data = r#"[{"id":"1"},{"content":"Real memory","id":"2"}]"#;
+        let result = parse_povm_memories(Some(data));
+        assert!(result.contains("[POVM] 1 memories"));
+        assert!(result.contains("Real memory"));
     }
 
     // ── MIN_PROMPT_LENGTH ──

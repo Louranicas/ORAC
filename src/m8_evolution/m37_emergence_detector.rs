@@ -11,7 +11,7 @@
 //!
 //! | Type | Detection Criteria |
 //! |------|--------------------|
-//! | `CoherenceLock` | r > 0.998 sustained for >= threshold ticks |
+//! | `CoherenceLock` | r > 0.995 sustained for >= threshold ticks |
 //! | `ChimeraFormation` | Phase gap > π/3 with r still above sync threshold |
 //! | `CouplingRunaway` | K increasing without r improvement |
 //! | `HebbianSaturation` | >80% of weights at floor or ceiling |
@@ -50,10 +50,17 @@ const MAX_MONITORS: usize = 50;
 /// Kuramoto fluctuations while still detecting genuine coherence locks.
 /// Session-066: Raised from 0.95 to 0.98 — 70% of emergence events were
 /// `coherence_lock` noise at 0.95. At 0.98, only genuine locks fire.
-const DEFAULT_COHERENCE_LOCK_R: f64 = 0.98;
+/// Session-073: Raised from 0.98 to 0.995 — with 6 spheres, r naturally
+/// oscillates 0.94-0.99. At 0.98, `CoherenceLock` fires during normal
+/// Kuramoto convergence and floods RM. 0.995 only fires when truly
+/// locked at r≈1.0 (matches `DegenerateMode` threshold at line 861).
+const DEFAULT_COHERENCE_LOCK_R: f64 = 0.995;
 
 /// Default coherence lock duration (ticks).
-const DEFAULT_COHERENCE_LOCK_TICKS: u64 = 10;
+/// Session-073: Raised from 10 to 25. With 6 spheres, r spikes above 0.995
+/// for 10-20 tick bursts during natural convergence. At 25 ticks (125s),
+/// only genuine sustained locks fire.
+const DEFAULT_COHERENCE_LOCK_TICKS: u64 = 25;
 
 /// Default coupling runaway K increase without r improvement (ticks).
 const DEFAULT_RUNAWAY_WINDOW: u64 = 20;
@@ -90,7 +97,7 @@ const FIELD_STABILITY_WINDOW: usize = 12;
 /// Classification of emergent fleet coordination behaviors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EmergenceType {
-    /// r > 0.998 sustained — field is over-synchronized, no differentiation.
+    /// r > 0.995 sustained — field is over-synchronized, no differentiation.
     CoherenceLock,
     /// Phase clusters form with gap > π/3 while r remains above sync threshold.
     ChimeraFormation,
@@ -1442,9 +1449,9 @@ mod tests {
     #[test]
     fn detect_coherence_lock_triggered() {
         let det = make_detector();
-        // 10 ticks of r > 0.98 (Session-066 threshold). Must be high enough that
-        // computed confidence exceeds min_confidence (0.6): r=0.995 → conf=0.75.
-        let r_history: Vec<f64> = vec![0.995; 10];
+        // Session-073: threshold 0.995, duration 25 ticks.
+        // 25 ticks of r=0.999 triggers with high confidence.
+        let r_history: Vec<f64> = vec![0.999; 25];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_some());
     }
@@ -1452,7 +1459,9 @@ mod tests {
     #[test]
     fn detect_coherence_lock_not_triggered() {
         let det = make_detector();
-        let r_history: Vec<f64> = vec![0.88; 10]; // Below 0.95
+        // Session-073: 0.99 is below the 0.995 threshold — should not trigger
+        // even with sufficient duration.
+        let r_history: Vec<f64> = vec![0.99; 25];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_none());
     }
@@ -1460,7 +1469,8 @@ mod tests {
     #[test]
     fn detect_coherence_lock_insufficient_data() {
         let det = make_detector();
-        let r_history: Vec<f64> = vec![0.999; 5]; // Less than 10
+        // Session-073: 15 ticks is less than the 25-tick window.
+        let r_history: Vec<f64> = vec![0.999; 15];
         let result = det.detect_coherence_lock(&r_history, 100).unwrap();
         assert!(result.is_none());
     }

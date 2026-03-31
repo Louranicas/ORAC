@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
+use axum::http::StatusCode;
 use axum::{Json, Router};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -703,7 +704,9 @@ impl OracState {
                 tracing::debug!("blackboard insert_ghost failed: {e}");
             }
             // BUG-064t fix: Align SQLite ghost cap with GHOST_MAX (20), not 100.
-            let _ = bb.prune_ghosts(MAX_GHOSTS);
+            if let Err(e) = bb.prune_ghosts(MAX_GHOSTS) {
+                tracing::warn!("blackboard prune_ghosts failed: {e}");
+            }
         }
 
         // In-memory ring buffer
@@ -802,13 +805,15 @@ impl OracState {
                 use crate::m5_bridges::m26_blackboard::ConsentAuditEntry;
                 let now = epoch_ms();
                 for (field, old, new) in &audit_entries {
-                    let _ = bb.insert_consent_audit(&ConsentAuditEntry {
+                    if let Err(e) = bb.insert_consent_audit(&ConsentAuditEntry {
                         sphere_id: sphere_id.to_owned(),
                         field_name: (*field).to_owned(),
                         old_value: *old,
                         new_value: *new,
                         changed_ms: now,
-                    });
+                    }) {
+                        tracing::warn!(sphere = %sphere_id, field = %field, "consent audit write failed: {e}");
+                    }
                 }
             }
         }
@@ -1653,7 +1658,7 @@ struct BlackboardQuery {
 /// ORAC-side metadata: last post tick, bridge health, consecutive failures.
 async fn thermal_handler(
     State(state): State<Arc<OracState>>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     #[cfg(feature = "bridges")]
     {
         let last_resp = state.synthex_bridge.last_response();
@@ -1661,7 +1666,7 @@ async fn thermal_handler(
         let last_poll = state.synthex_bridge.last_poll_tick();
 
         if let Some(resp) = last_resp {
-            Json(serde_json::json!({
+            (StatusCode::OK, Json(serde_json::json!({
                 "source": "orac_cache",
                 "temperature": resp.temperature,
                 "target": resp.target,
@@ -1671,22 +1676,22 @@ async fn thermal_handler(
                 "bridge_consecutive_failures": failures,
                 "last_poll_tick": last_poll,
                 "orac_tick": state.tick.load(Ordering::Relaxed),
-            }))
+            })))
         } else {
-            Json(serde_json::json!({
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
                 "source": "orac_cache",
                 "error": "no thermal data cached — bridge not yet polled",
                 "bridge_consecutive_failures": failures,
                 "last_poll_tick": last_poll,
                 "orac_tick": state.tick.load(Ordering::Relaxed),
-            }))
+            })))
         }
     }
     #[cfg(not(feature = "bridges"))]
     {
-        Json(serde_json::json!({
+        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
             "error": "bridges feature not enabled"
-        }))
+        })))
     }
 }
 
@@ -1862,7 +1867,7 @@ fn build_ralph_json(state: &OracState) -> serde_json::Value {
 #[cfg(feature = "persistence")]
 async fn blackboard_prune_handler(
     State(state): State<Arc<OracState>>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(bb) = state.blackboard() {
         let report = bb.prune_all();
         tracing::info!(
@@ -1871,16 +1876,16 @@ async fn blackboard_prune_handler(
             coupling = report.coupling_compacted,
             "Blackboard prune completed"
         );
-        Json(serde_json::json!(report))
+        (StatusCode::OK, Json(serde_json::json!(report)))
     } else {
-        Json(serde_json::json!({"error": "blackboard not available"}))
+        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "blackboard not available"})))
     }
 }
 
 /// Blackboard prune handler stub when persistence feature is disabled.
 #[cfg(not(feature = "persistence"))]
-async fn blackboard_prune_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"error": "persistence feature not enabled"}))
+async fn blackboard_prune_handler() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "persistence feature not enabled"})))
 }
 
 /// Metrics handler — Prometheus-compatible text format.
@@ -2090,17 +2095,17 @@ async fn field_ghosts_handler(
 async fn consent_get_handler(
     State(state): State<Arc<OracState>>,
     Path(sphere_id): Path<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     // BUG-057n: validate sphere_id format (alphanumeric + colon + dash + underscore, max 128 chars)
     if sphere_id.len() > 128
         || !sphere_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_' || c == '.')
     {
-        return Json(serde_json::json!({"error": "invalid sphere_id format"}));
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid sphere_id format"})));
     }
     let consent = state.get_consent(&sphere_id);
-    Json(serde_json::json!({
+    (StatusCode::OK, Json(serde_json::json!({
         "sphere_id": sphere_id,
         "consents": {
             "synthex_write": consent.synthex_write,
@@ -2109,7 +2114,7 @@ async fn consent_get_handler(
             "hydration": consent.hydration,
         },
         "updated_ms": consent.updated_ms,
-    }))
+    })))
 }
 
 /// Update consent declarations for a sphere (FIX-018).
@@ -2120,14 +2125,14 @@ async fn consent_put_handler(
     State(state): State<Arc<OracState>>,
     Path(sphere_id): Path<String>,
     Json(body): Json<ConsentUpdateRequest>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     // BUG-057n: validate sphere_id format
     if sphere_id.len() > 128
         || !sphere_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_' || c == '.')
     {
-        return Json(serde_json::json!({"error": "invalid sphere_id format"}));
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid sphere_id format"})));
     }
     let updated = state.update_consent(&sphere_id, &body);
 
@@ -2143,10 +2148,10 @@ async fn consent_put_handler(
     .to_string();
     fire_and_forget_post(pv2_url, pv2_body);
 
-    Json(serde_json::json!({
+    (StatusCode::OK, Json(serde_json::json!({
         "status": "ok",
         "updated": updated,
-    }))
+    })))
 }
 
 // ──────────────────────────────────────────────────────────────

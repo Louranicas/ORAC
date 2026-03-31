@@ -964,6 +964,31 @@ fn trigger_vms_consolidation(state: &OracState, tick: u64) {
     }
 }
 
+/// Trigger POVM memory consolidation (Session 073 — `MED-04` fix).
+///
+/// Sends a POST to POVM `/consolidate` to crystallise mature memories (access >= 5,
+/// intensity >= 0.5), decay stale ones by 10%, and prune pathways below threshold.
+/// Without periodic triggers, memories accumulate without crystallisation.
+#[cfg(feature = "bridges")]
+fn trigger_povm_consolidation(state: &OracState, tick: u64) {
+    use orac_sidecar::m5_bridges::http_helpers::raw_http_post;
+
+    if !state.breaker_allows("povm") {
+        return;
+    }
+
+    match raw_http_post("127.0.0.1:8125", "/consolidate", b"{}", "povm") {
+        Ok(status) => {
+            state.breaker_success("povm");
+            tracing::info!(tick, status, "POVM consolidation triggered");
+        }
+        Err(e) => {
+            state.breaker_failure("povm");
+            tracing::warn!(tick, "POVM consolidation failed: {e}");
+        }
+    }
+}
+
 /// Hydrate top POVM memories into blackboard `povm_context` table (Session 066).
 ///
 /// Every 60 ticks (~300s), fetches memories from POVM sorted by intensity,
@@ -1529,10 +1554,11 @@ fn spawn_ralph_loop(
                             );
                         }
 
-                        // Session 072: Apply gentle weight decay every tick to prevent
-                        // coupling ceiling lock (0.75) and regulate LTP/LTD ratio.
-                        // Factor 0.999 = 0.1% decay per tick = ~1% per 10 ticks.
-                        decay_all_weights(&mut state.coupling.write(), 0.999);
+                        // Session 073 BUG-073-C fix: Gentler weight decay to allow
+                        // differentiation. 0.995 was too aggressive — pushed 24/30
+                        // weights to floor. Factor 0.9975 = 0.25% decay per tick.
+                        // Equilibrium shifts from floor back to mid-range (~0.45-0.65).
+                        decay_all_weights(&mut state.coupling.write(), 0.9975);
 
                         if stdp_result.ltp_count > 0 || stdp_result.ltd_count > 0 {
                             // BUG-SCAN-001 fix: record last tick STDP ran for /health
@@ -1875,8 +1901,12 @@ fn spawn_ralph_loop(
                     }
 
                     // Gen-060a: Relay new emergence events to RM for cross-session persistence.
+                    // Session 073 BUG-073-D fix: Throttle from every tick to every 30 ticks
+                    // to prevent RM flooding (was 98.6% ORAC telemetry noise drowning signal).
                     #[cfg(all(feature = "bridges", feature = "evolution"))]
-                    relay_emergence_to_rm(&state, tick);
+                    if tick % 30 == 0 {
+                        relay_emergence_to_rm(&state, tick);
+                    }
 
                     // Session 071 #7: Relay emergence hints to ME evolution chamber.
                     #[cfg(all(feature = "bridges", feature = "evolution"))]
@@ -1903,6 +1933,7 @@ fn spawn_ralph_loop(
                     #[cfg(feature = "bridges")]
                     if tick % 300 == 0 && tick > 0 {
                         trigger_vms_consolidation(&state, tick);
+                        trigger_povm_consolidation(&state, tick);
                     }
 
                     // Poll SYNTHEX thermal for k_adjustment

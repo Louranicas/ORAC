@@ -233,6 +233,18 @@ impl Blackboard {
     pub fn open(path: &str) -> PvResult<Self> {
         let conn = Connection::open(path)
             .map_err(|e| PvError::Database(format!("open {path}: {e}")))?;
+
+        // WAL mode: allows concurrent readers while a single writer operates.
+        // busy_timeout: retries up to 5s instead of instant SQLITE_BUSY failure.
+        // synchronous=NORMAL: safe with WAL, reduces fsync overhead (~2x faster writes).
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA cache_size=-2000;",
+        )
+        .map_err(|e| PvError::Database(format!("PRAGMA setup for {path}: {e}")))?;
+
         let bb = Self { conn };
         bb.migrate()?;
         Ok(bb)
@@ -246,6 +258,8 @@ impl Blackboard {
     pub fn in_memory() -> PvResult<Self> {
         let conn = Connection::open_in_memory()
             .map_err(|e| PvError::Database(format!("in-memory: {e}")))?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")
+            .map_err(|e| PvError::Database(format!("PRAGMA setup: {e}")))?;
         let bb = Self { conn };
         bb.migrate()?;
         Ok(bb)
@@ -1365,6 +1379,114 @@ impl Blackboard {
             );
         }
         Ok(weights)
+    }
+
+    // ── Comprehensive GC (Session 070) ──
+
+    /// Run all pruning operations with conservative defaults.
+    ///
+    /// Returns a [`PruneReport`] summarising what was removed. Each sub-prune
+    /// is independent — a failure in one does not prevent the others from
+    /// running. Errors are collected, not propagated.
+    ///
+    /// Default retention windows:
+    /// - Stale panes: >7 days since `last_seen`
+    /// - Completed panes: >1 day
+    /// - Old tasks: >7 days since completion
+    /// - Ghosts: keep newest 50
+    /// - Hebbian summaries: keep newest 1000
+    /// - Consent audit: keep newest 500
+    /// - Sessions: >7 days (by `saved_at_secs`)
+    /// - Coupling weights: keep only latest per (source, target) pair
+    pub fn prune_all(&self) -> PruneReport {
+        let day_secs = 86_400.0;
+        let week_secs = 7.0 * day_secs;
+
+        PruneReport {
+            stale_panes: self.prune_stale_panes(week_secs).unwrap_or(0),
+            complete_panes: self.prune_complete_panes(day_secs).unwrap_or(0),
+            old_tasks: self.prune_old_tasks(week_secs).unwrap_or(0),
+            ghosts: self.prune_ghosts(50).unwrap_or(0),
+            hebbian_summaries: self.prune_hebbian_summaries(1000).unwrap_or(0),
+            consent_audit: self.prune_consent_audit(500).unwrap_or(0),
+            stale_sessions: self.prune_stale_sessions(week_secs).unwrap_or(0),
+            coupling_compacted: self.compact_coupling_weights().unwrap_or(0),
+        }
+    }
+
+    /// Remove sessions older than `age_secs` (by `saved_at_secs`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on `SQLite` failure.
+    pub fn prune_stale_sessions(&self, age_secs: f64) -> PvResult<usize> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let cutoff = now - age_secs;
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM sessions WHERE saved_at_secs < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| PvError::Database(format!("prune_stale_sessions: {e}")))?;
+        Ok(deleted)
+    }
+
+    /// Compact coupling weights: keep only the newest row per (source, target) pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on `SQLite` failure.
+    pub fn compact_coupling_weights(&self) -> PvResult<usize> {
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM coupling_weights WHERE rowid NOT IN (
+                     SELECT MAX(rowid) FROM coupling_weights GROUP BY source, target
+                 )",
+                [],
+            )
+            .map_err(|e| PvError::Database(format!("compact_coupling_weights: {e}")))?;
+        Ok(deleted)
+    }
+}
+
+/// Report from [`Blackboard::prune_all`] summarising items removed per category.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PruneReport {
+    /// Panes not seen for >7 days.
+    pub stale_panes: usize,
+    /// Panes in Complete status for >1 day.
+    pub complete_panes: usize,
+    /// Tasks completed >7 days ago.
+    pub old_tasks: usize,
+    /// Ghost traces beyond the 50-entry cap.
+    pub ghosts: usize,
+    /// Hebbian summaries beyond the 1000-entry cap.
+    pub hebbian_summaries: usize,
+    /// Consent audit entries beyond the 500-entry cap.
+    pub consent_audit: usize,
+    /// Sessions older than 7 days.
+    pub stale_sessions: usize,
+    /// Duplicate coupling weight rows compacted.
+    pub coupling_compacted: usize,
+}
+
+impl PruneReport {
+    /// Total items removed across all categories.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.stale_panes
+            + self.complete_panes
+            + self.old_tasks
+            + self.ghosts
+            + self.hebbian_summaries
+            + self.consent_audit
+            + self.stale_sessions
+            + self.coupling_compacted
     }
 }
 
@@ -2657,6 +2779,31 @@ mod tests {
                 .unwrap();
             let loaded = b.load_coupling_weights().unwrap();
             assert!((loaded[0].weight - 0.123_456_789).abs() < 1e-12);
+        }
+
+        #[test]
+        fn wal_mode_active_on_file_backed_db() {
+            let path = format!("/tmp/orac-test-wal-{}.db", std::process::id());
+            let b = Blackboard::open(&path).unwrap();
+            let mode: String = b
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            drop(b);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(format!("{path}-wal"));
+            let _ = std::fs::remove_file(format!("{path}-shm"));
+            assert_eq!(mode, "wal", "WAL mode must be active for concurrent performance");
+        }
+
+        #[test]
+        fn busy_timeout_configured() {
+            let b = Blackboard::in_memory().unwrap();
+            let timeout: i64 = b
+                .conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(timeout, 5000, "busy_timeout must be 5000ms");
         }
     }
 }

@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -185,7 +186,7 @@ impl PermissionPolicy {
 pub async fn handle_permission_request(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     // SEC-001 fix: Use policy from OracState (loaded from hooks.toml at startup),
     // not a throwaway PermissionPolicy::default() per request.
     // SEC-002 fix: Case-insensitive comparison via policy.evaluate().
@@ -195,15 +196,15 @@ pub async fn handle_permission_request(
     let decision = state.permission_policy.evaluate(tool_name);
 
     match decision {
-        Decision::Allow => Json(HookResponse::empty()),
+        Decision::Allow => (StatusCode::OK, Json(HookResponse::empty())),
         Decision::AllowWithNotice => {
-            Json(HookResponse::allow(Some(format!(
+            (StatusCode::OK, Json(HookResponse::allow(Some(format!(
                 "[ORAC] Auto-approved write operation: {tool_name}"
-            ))))
+            )))))
         }
-        Decision::Deny => Json(HookResponse::block(format!(
+        Decision::Deny => (StatusCode::OK, Json(HookResponse::block(format!(
             "[ORAC] Denied: {tool_name} is blocked by fleet policy"
-        ))),
+        )))),
     }
 }
 

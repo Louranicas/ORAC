@@ -356,6 +356,32 @@ impl MeBridge {
         adj.clamp(m04_constants::K_MOD_BUDGET_MIN, m04_constants::K_MOD_BUDGET_MAX)
     }
 
+    /// Session 071 #4: Normalize ORAC Hebbian weight to ME weight space.
+    ///
+    /// ORAC range: `[WEIGHT_FLOOR(0.15), SOFT_CEILING(0.85)]`
+    /// ME range: `[0.0, 1.0]`
+    /// Linear mapping: `(orac_w - 0.15) / (0.85 - 0.15)`
+    #[must_use]
+    pub fn orac_weight_to_me(orac_weight: f64) -> f64 {
+        let floor = m04_constants::HEBBIAN_WEIGHT_FLOOR;
+        let ceiling = 0.85_f64; // HEBBIAN_SOFT_CEILING from m18
+        let clamped = orac_weight.clamp(floor, ceiling);
+        (clamped - floor) / (ceiling - floor)
+    }
+
+    /// Session 071 #4: Normalize ME Hebbian weight to ORAC weight space.
+    ///
+    /// ME range: `[0.0, 1.0]`
+    /// ORAC range: `[WEIGHT_FLOOR(0.15), SOFT_CEILING(0.85)]`
+    /// Linear mapping: `me_w * (0.85 - 0.15) + 0.15`
+    #[must_use]
+    pub fn me_weight_to_orac(me_weight: f64) -> f64 {
+        let floor = m04_constants::HEBBIAN_WEIGHT_FLOOR;
+        let ceiling = 0.85_f64;
+        let clamped = me_weight.clamp(0.0, 1.0);
+        clamped.mul_add(ceiling - floor, floor)
+    }
+
     /// Poll the ME observer endpoint.
     ///
     /// # Errors
@@ -389,7 +415,11 @@ impl MeBridge {
             state.frozen_count = 0;
         }
 
-        state.is_frozen = state.frozen_count >= FROZEN_THRESHOLD
+        // BUG-060b/070: Only mark frozen if genuinely stuck at a pathologically
+        // low value (< 0.4, e.g. the BUG-008 plateau at 0.3662). Normal ME fitness
+        // at 0.609 oscillates within FROZEN_TOLERANCE and triggered false freeze
+        // detections — disabling coupling weight modulation for all sessions.
+        state.is_frozen = (state.frozen_count >= FROZEN_THRESHOLD && fitness < 0.4)
             || (fitness - BUG_008_FROZEN_FITNESS).abs() < FROZEN_TOLERANCE;
 
         state.last_fitness = fitness;
@@ -478,7 +508,10 @@ impl Bridgeable for MeBridge {
     fn health(&self) -> PvResult<bool> {
         match raw_http_get(&self.base_url, HEALTH_PATH, &self.service) {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                tracing::warn!(service = %self.service, error = %e, "bridge health check failed");
+                Ok(false)
+            }
         }
     }
 
@@ -628,19 +661,43 @@ mod tests {
     }
 
     #[test]
-    fn frozen_detected_after_threshold() {
+    fn frozen_detected_after_threshold_at_low_fitness() {
+        // BUG-060b/070: Frozen detection only triggers for pathologically
+        // low fitness (< 0.4). Normal fitness at 0.5+ is NOT frozen.
         let bridge = MeBridge::new();
         let mut state = bridge.state.write();
-        state.last_fitness = 0.5;
+        state.last_fitness = 0.35; // Below 0.4 threshold
 
-        // Simulate identical readings
+        // Simulate identical readings at low fitness
         for _ in 0..FROZEN_THRESHOLD {
-            if (0.5 - state.last_fitness).abs() < FROZEN_TOLERANCE {
+            if (0.35 - state.last_fitness).abs() < FROZEN_TOLERANCE {
                 state.frozen_count = state.frozen_count.saturating_add(1);
             }
         }
-        state.is_frozen = state.frozen_count >= FROZEN_THRESHOLD;
+        // Apply the production logic (BUG-070 fix)
+        let fitness = 0.35;
+        state.is_frozen = (state.frozen_count >= FROZEN_THRESHOLD && fitness < 0.4)
+            || (fitness - BUG_008_FROZEN_FITNESS).abs() < FROZEN_TOLERANCE;
         assert!(state.is_frozen);
+    }
+
+    #[test]
+    fn frozen_not_triggered_at_healthy_fitness() {
+        // BUG-070: Normal ME fitness at 0.609 should NOT be marked frozen
+        // even if it remains stable across multiple polls.
+        let bridge = MeBridge::new();
+        let mut state = bridge.state.write();
+        state.last_fitness = 0.609;
+
+        for _ in 0..FROZEN_THRESHOLD {
+            if (0.609 - state.last_fitness).abs() < FROZEN_TOLERANCE {
+                state.frozen_count = state.frozen_count.saturating_add(1);
+            }
+        }
+        let fitness = 0.609;
+        state.is_frozen = (state.frozen_count >= FROZEN_THRESHOLD && fitness < 0.4)
+            || (fitness - BUG_008_FROZEN_FITNESS).abs() < FROZEN_TOLERANCE;
+        assert!(!state.is_frozen, "ME at 0.609 should NOT be marked frozen");
     }
 
     #[test]

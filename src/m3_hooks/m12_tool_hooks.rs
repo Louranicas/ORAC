@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 
 use crate::m1_core::m01_core_types::PaneId;
@@ -49,7 +50,7 @@ const POLL_EVERY_N: u64 = 5;
 pub async fn handle_post_tool_use(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     let tool_name = event.tool_name.as_deref().unwrap_or("unknown");
     let tool_output = event.tool_output.as_deref().unwrap_or("");
     let summary = event
@@ -172,7 +173,7 @@ pub async fn handle_post_tool_use(
 
     // If we have an active task, skip polling — we're working on it
     if has_active_task(&state, &session_id) {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     }
 
     // 4. Throttled task polling (1-in-5)
@@ -180,7 +181,7 @@ pub async fn handle_post_tool_use(
     // Old code: 0%5==0 triggered poll on very first PostToolUse.
     let poll_count = increment_poll_counter(&state, &session_id);
     if poll_count % POLL_EVERY_N != 1 {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     }
 
     // 5. Poll, route, and claim
@@ -196,13 +197,13 @@ async fn poll_route_and_claim(
     state: &Arc<OracState>,
     session_id: &str,
     pane_id_str: &str,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     let tasks_url = format!("{}/bus/tasks", state.pv2_url);
     let tasks_data = http_get(&tasks_url, 1000).await;
 
     let pending = find_pending_tasks(tasks_data.as_deref());
     if pending.is_empty() {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     }
 
     // Pick best task for THIS pane using semantic routing (M20)
@@ -222,7 +223,7 @@ async fn poll_route_and_claim(
     // Fallback: if no task routes to this pane, claim first one anyway
     let task = best_task.or_else(|| pending.first());
     let Some(task) = task else {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     };
 
     // Record dispatch domain for metrics
@@ -261,10 +262,10 @@ async fn poll_route_and_claim(
             "[FLEET TASK] Claimed {}: {}. When done, include TASK_COMPLETE in your response.",
             task.id, task.description,
         );
-        return Json(HookResponse::with_message(message));
+        return (StatusCode::OK, Json(HookResponse::with_message(message)));
     }
 
-    Json(HookResponse::empty())
+    (StatusCode::OK, Json(HookResponse::empty()))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -279,18 +280,18 @@ async fn poll_route_and_claim(
 pub async fn handle_pre_tool_use(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     let tool_name = event.tool_name.as_deref().unwrap_or("");
 
     // Only gate write operations
     if !is_write_operation(tool_name) {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     }
 
     // Check thermal state from SYNTHEX (breaker-gated, fail-open)
     #[cfg(feature = "intelligence")]
     if !state.breaker_allows("synthex") {
-        return Json(HookResponse::empty());
+        return (StatusCode::OK, Json(HookResponse::empty()));
     }
 
     let thermal_url = format!("{}/v3/thermal", state.synthex_url);
@@ -309,11 +310,11 @@ pub async fn handle_pre_tool_use(
             let message = format!(
                 "[THERMAL] System HOT: T={temp:.3} target={target:.3}. Consider reducing write frequency."
             );
-            return Json(HookResponse::with_message(message));
+            return (StatusCode::OK, Json(HookResponse::with_message(message)));
         }
     }
 
-    Json(HookResponse::empty())
+    (StatusCode::OK, Json(HookResponse::empty()))
 }
 
 // ──────────────────────────────────────────────────────────────

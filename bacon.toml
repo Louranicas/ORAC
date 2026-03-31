@@ -1,25 +1,60 @@
-# bacon configuration for ORAC sidecar
+# Bacon configuration for ORAC Sidecar (Session 067 — god-tier)
 # https://dystroy.org/bacon/
 
+default_job = "check"
+listen = true
+
+[exports.locations]
+auto = true
+path = ".bacon-locations"
+line_format = "{kind} {path}:{line}:{column} {message}"
+
+# ── Core Jobs ──
+
 [jobs.check]
-command = ["cargo", "check", "--color", "always"]
+command = ["cargo", "check", "--features", "full", "--color", "always"]
 need_stdout = false
-env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+on_success = "job:clippy"
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
 
 [jobs.clippy]
-command = ["cargo", "clippy", "--color", "always", "--", "-D", "warnings", "-W", "clippy::pedantic"]
+command = ["cargo", "clippy", "--features", "full", "--color", "always", "--", "-D", "warnings"]
 need_stdout = false
-env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+on_success = "job:pedantic"
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
+
+[jobs.pedantic]
+command = ["cargo", "clippy", "--features", "full", "--color", "always", "--", "-D", "warnings", "-W", "clippy::pedantic"]
+need_stdout = false
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
 
 [jobs.test]
-command = ["cargo", "test", "--lib", "--color", "always"]
+command = ["cargo", "test", "--lib", "--release", "--features", "full", "--color", "always"]
 need_stdout = true
-env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
+
+# ── Pipeline Jobs ──
+
+[jobs.gate]
+command = ["bash", "-c", "CARGO_TARGET_DIR=/tmp/cargo-orac cargo check --features full 2>&1 | tail -5 && echo '--- CLIPPY ---' && CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy --features full -- -D warnings 2>&1 | tail -5 && echo '--- PEDANTIC ---' && CARGO_TARGET_DIR=/tmp/cargo-orac cargo clippy --features full -- -D warnings -W clippy::pedantic 2>&1 | tail -5 && echo '--- TEST ---' && CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release --features full 2>&1 | tail -10"]
+need_stdout = true
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
+
+# ── Doc Jobs ──
 
 [jobs.doc]
-command = ["cargo", "doc", "--no-deps", "--color", "always"]
+command = ["cargo", "doc", "--no-deps", "--features", "full", "--color", "always"]
 need_stdout = false
-env.CARGO_TARGET_DIR = "/tmp/cargo-orac"
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
 
-[default_job]
-name = "check"
+[jobs.doc-open]
+command = ["cargo", "doc", "--no-deps", "--features", "full", "--open"]
+need_stdout = false
+on_success = "back"
+env = { CARGO_TARGET_DIR = "/tmp/cargo-orac" }
+
+# ── Keybindings ──
+# check(default) → c:clippy → p:pedantic → t:test → g:gate → d:doc
+[keybindings]
+p = "job:pedantic"
+g = "job:gate"

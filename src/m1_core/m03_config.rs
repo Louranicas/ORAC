@@ -126,7 +126,7 @@ impl PvConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    /// TCP port to listen on (default `8132`).
+    /// TCP port to listen on (default `8133`).
     pub port: u16,
     /// Bind address (default `127.0.0.1`).
     pub bind_addr: String,
@@ -137,7 +137,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            port: 8132,
+            port: 8133,
             bind_addr: "127.0.0.1".into(),
             body_limit_bytes: 65536,
         }
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn default_config_has_correct_port() {
         let config = PvConfig::default();
-        assert_eq!(config.server.port, 8132);
+        assert_eq!(config.server.port, 8133);
     }
 
     #[test]

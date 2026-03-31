@@ -457,7 +457,10 @@ impl Bridgeable for PovmBridge {
     fn health(&self) -> PvResult<bool> {
         match raw_http_get_with_limit(&self.base_url, HEALTH_PATH, &self.service, MAX_RESPONSE_SIZE) {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                tracing::warn!(service = %self.service, error = %e, "bridge health check failed");
+                Ok(false)
+            }
         }
     }
 

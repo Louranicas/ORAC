@@ -513,7 +513,10 @@ impl Bridgeable for SynthexBridge {
     fn health(&self) -> PvResult<bool> {
         match raw_http_get(&self.base_url, HEALTH_PATH, &self.service) {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                tracing::warn!(service = %self.service, error = %e, "bridge health check failed");
+                Ok(false)
+            }
         }
     }
 

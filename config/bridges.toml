@@ -28,3 +28,10 @@ poll_interval_ms = 10000
 retry_count = 2
 timeout_ms = 5000
 consent_required = true
+
+[bridges.me_v2]
+addr = "127.0.0.1:8180"
+poll_interval_s = 10
+retry_count = 2
+timeout_s = 5
+consent_required = false

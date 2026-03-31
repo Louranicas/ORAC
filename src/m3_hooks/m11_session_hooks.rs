@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 
 use super::m10_hook_server::{
@@ -33,7 +34,7 @@ use super::m10_hook_server::{
 pub async fn handle_session_start(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     let session_id = event
         .session_id
         .unwrap_or_else(|| format!("sess-{}", uuid::Uuid::new_v4()));
@@ -125,7 +126,7 @@ pub async fn handle_session_start(
         "[HABITAT] Hydration skipped (consent denied)".to_owned()
     };
 
-    Json(HookResponse::with_message(message))
+    (StatusCode::OK, Json(HookResponse::with_message(message)))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -143,7 +144,7 @@ pub async fn handle_session_start(
 pub async fn handle_stop(
     State(state): State<Arc<OracState>>,
     Json(event): Json<HookEvent>,
-) -> Json<HookResponse> {
+) -> (StatusCode, Json<HookResponse>) {
     let session_id = event.session_id.unwrap_or_default();
 
     let tracker = state.remove_session(&session_id);
@@ -309,7 +310,7 @@ pub async fn handle_stop(
         fire_and_forget_post(dereg_url, String::new());
     }
 
-    Json(HookResponse::empty())
+    (StatusCode::OK, Json(HookResponse::empty()))
 }
 
 fn parse_povm_hydration(data: Option<&str>) -> (u64, u64) {

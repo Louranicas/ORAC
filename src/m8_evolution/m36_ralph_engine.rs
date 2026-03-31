@@ -41,10 +41,15 @@ use super::m40_mutation_selector::{MutationProposal, MutationSelector};
 // ──────────────────────────────────────────────────────────────
 
 /// Default minimum fitness improvement to accept a mutation.
-const DEFAULT_ACCEPT_THRESHOLD: f64 = 0.02;
+/// Session 073: Widened from 0.02 to 0.05. With 50% of fitness weight on
+/// volatile external services (PV2 r, SYNTHEX thermal, ME fitness), natural
+/// jitter is ±0.055 per tick. The old 0.02 threshold accepted jitter as signal.
+const DEFAULT_ACCEPT_THRESHOLD: f64 = 0.05;
 
 /// Default fitness regression that triggers rollback.
-const DEFAULT_ROLLBACK_THRESHOLD: f64 = -0.01;
+/// Session 073: Widened from -0.01 to -0.03. The old -0.01 triggered rollback
+/// storms when SYNTHEX breaker opened (observed: fitness 0.84→0.67 in 60s).
+const DEFAULT_ROLLBACK_THRESHOLD: f64 = -0.03;
 
 /// Default verification window (ticks to wait before harvest).
 const DEFAULT_VERIFICATION_TICKS: u64 = 10;

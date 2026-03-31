@@ -35,6 +35,15 @@ Then read `CLAUDE.local.md` for current session state and phase tracking.
 | `/propagate` | Push command table to all service CLAUDE.md files across the Habitat. |
 | `/nvim-mastery` | Neovim RPC: LSP, treesitter, 37 keymaps, 22 snacks features, structural analysis |
 | `/atuin-mastery` | Shell history intelligence: search, stats, service density, time-of-day, KV store |
+| `/bacon-mastery` | Continuous Rust quality: on_success chaining, socket control, export locations, headless CI |
+| `/lazygit-mastery` | Git porcelain: 15 Habitat commands, worktrees, rebase, cherry-pick, bisect |
+| `/worktree-mastery` | Multi-agent isolation: 4 worktree systems, fleet patterns, merge coordination |
+| `/fzf-mastery` | Universal fuzzy query: --filter pipelines, clustered parallel search, --listen HTTP |
+| `/topology` | Structural census across service directories |
+| `/metabolic` | Cross-service composite: ME x ORAC x PV2 |
+| `/intel` | 17ms habitat pulse: r, gen, fitness, LTP/LTD, thermal |
+| `/tensor` | 6D system tensor in ~65ms (temporal, services, memory, synthesis) |
+| `/save-session` | Persist session state to all 7 memory substrates |
 
 ## Architecture (8 Layers, 40 Modules, 3 Binaries)
 
