@@ -272,6 +272,34 @@ pub async fn handle_stop(
         }
     }
 
+    // 5c. Session 078: Record CC decision/learning summary to blackboard.
+    // Captures session fitness context so future CC instances can query
+    // "what did this instance experience?" via decisions_by_task().
+    #[cfg(all(feature = "persistence", feature = "evolution"))]
+    if let Some(bb) = state.blackboard() {
+        if let Some(ref t) = tracker {
+            let rs = state.ralph.state();
+            #[allow(clippy::cast_precision_loss)]
+            let now = super::m10_hook_server::epoch_ms() as f64 / 1000.0;
+            let record = crate::m5_bridges::m26_blackboard::DecisionRecord {
+                decision_id: format!("stop-{}", uuid::Uuid::new_v4()),
+                pane_id: pane_id_str.clone(),
+                task: "session_summary".into(),
+                decision: format!(
+                    "tools={} ralph_gen={} fitness={:.4} r={:.4}",
+                    t.total_tool_calls, rs.generation, rs.current_fitness, r_value
+                ),
+                confidence: rs.current_fitness.clamp(0.0, 1.0),
+                evidence_json: "[]".into(),
+                session: session_id.clone(),
+                created_at: now,
+            };
+            if let Err(e) = bb.insert_decision(&record) {
+                tracing::debug!(pane = %pane_id_str, "decision record save failed: {e}");
+            }
+        }
+    }
+
     // 6. Record ghost trace before deregistration
     {
         use super::m10_hook_server::{epoch_ms, OracGhost};

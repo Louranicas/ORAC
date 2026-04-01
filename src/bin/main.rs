@@ -1976,6 +1976,31 @@ fn spawn_ralph_loop(
                         }
                     }
 
+                    // Session 078: Persist fitness tensor snapshot every 100 ticks
+                    // for post-restart forensics ("why did fitness drop?").
+                    #[cfg(all(feature = "persistence", feature = "evolution"))]
+                    if tick % 100 == 0 && tick > 0 {
+                        if let Some(bb) = state.blackboard() {
+                            let rs = state.ralph.state();
+                            let dims_json = serde_json::to_string(&tensor.values)
+                                .unwrap_or_else(|_| "[]".to_owned());
+                            #[allow(clippy::cast_precision_loss)]
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0.0, |d| d.as_secs_f64());
+                            let record = orac_sidecar::m5_bridges::m26_blackboard::FitnessSnapshotRecord {
+                                tick,
+                                generation: rs.generation,
+                                overall_score: rs.current_fitness,
+                                dimensions_json: dims_json,
+                                created_at: now,
+                            };
+                            if let Err(e) = bb.insert_fitness_snapshot(&record) {
+                                tracing::debug!("Fitness snapshot save failed: {e}");
+                            }
+                        }
+                    }
+
                     // BUG-043 fix: Record a trace span for each RALPH tick
                     #[cfg(feature = "monitoring")]
                     {
@@ -2059,6 +2084,83 @@ fn spawn_ralph_loop(
                     #[cfg(all(feature = "bridges", feature = "evolution"))]
                     relay_emergence_to_me(&state, tick);
 
+                    // Session 078: Broadcast emergence alerts to Atuin KV for
+                    // cross-instance visibility. CC instances can read these via
+                    // `cc-kv get habitat.alert.latest` without polling ORAC HTTP.
+                    // Review fix: Batch all alerts into a single spawn_blocking to
+                    // avoid spawning 2 processes per emergence event per tick.
+                    {
+                        let recent = state.ralph.emergence().recent(3);
+                        let alerts: Vec<(String, String)> = recent
+                            .iter()
+                            .filter(|r| r.detected_at_tick == tick)
+                            .map(|r| {
+                                let key = format!("habitat.alert.{}", r.emergence_type);
+                                let val = format!(
+                                    "{}|conf={:.2}|sev={}|tick={}",
+                                    r.emergence_type, r.confidence, r.severity_class, tick
+                                );
+                                (key, val)
+                            })
+                            .collect();
+                        if !alerts.is_empty() {
+                            tokio::task::spawn_blocking(move || {
+                                let mut latest_val = String::new();
+                                for (key, val) in &alerts {
+                                    let _ = std::process::Command::new("atuin")
+                                        .args(["kv", "set", "--key", key, val])
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .status();
+                                    latest_val.clone_from(val);
+                                }
+                                if !latest_val.is_empty() {
+                                    let _ = std::process::Command::new("atuin")
+                                        .args(["kv", "set", "--key", "habitat.alert.latest",
+                                            &latest_val])
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .status();
+                                }
+                            });
+                        }
+                    }
+
+                    // Session 078 Flow 3: Route emergence events to SYNTHEX via
+                    // Nexus Push as cc_coordination events. Uses the Nexus Bus
+                    // channel (which SYNTHEX expects) instead of /api/ingest
+                    // (which expects heat source format). SYNTHEX can detect
+                    // cross-session coordination patterns from these events.
+                    #[cfg(all(feature = "bridges", feature = "evolution"))]
+                    if state.breaker_allows("synthex") {
+                        let recent = state.ralph.emergence().recent(3);
+                        let cc_events: Vec<_> = recent
+                            .iter()
+                            .filter(|r| r.detected_at_tick == tick)
+                            .map(|r| {
+                                orac_sidecar::m5_bridges::m22_synthex_bridge::NexusEvent {
+                                    event_type: "cc_coordination".to_owned(),
+                                    ts: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map_or(0, |d| d.as_secs()),
+                                    data: serde_json::json!({
+                                        "emergence_type": r.emergence_type.to_string(),
+                                        "confidence": r.confidence,
+                                        "severity": r.severity,
+                                        "severity_class": r.severity_class.to_string(),
+                                        "tick": tick,
+                                        "fitness_snapshot": r.fitness_snapshot,
+                                    }),
+                                }
+                            })
+                            .collect();
+                        if !cc_events.is_empty() {
+                            if let Err(e) = state.synthex_bridge.nexus_push(&cc_events) {
+                                tracing::debug!("Nexus cc_coordination push failed: {e}");
+                            }
+                        }
+                    }
+
                     // METABOLIC-GAP-1 fix: Post field state to SYNTHEX /api/ingest
                     // every 6 ticks to feed heat sources (HS-001 r, HS-003 fitness,
                     // HS-004 sphere count). This activates SYNTHEX thermal regulation.
@@ -2103,10 +2205,95 @@ fn spawn_ralph_loop(
                             state.synthex_bridge.set_last_poll_tick(tick);
                             #[cfg(feature = "intelligence")]
                             state.breaker_success("synthex");
+
+                            // Session 078 Flow 1: Apply thermal feedback to STDP
+                            // decay rate. Hot system → faster decay (weights shrink
+                            // → coupling reduces → thermal load drops). Cold system
+                            // → slower decay (weights persist → coupling strengthens).
+                            // k_adj is already (1.0 - deviation*0.2).clamp(0.8, 1.2),
+                            // so inverted: hot=0.8 → decay_mult=1.2, cold=1.2 → 0.8.
+                            let decay_mult = (2.0 - k_adj).clamp(0.8, 1.2);
+                            let base_decay = f64::from_bits(
+                                state.ralph_decay_rate.load(std::sync::atomic::Ordering::Relaxed),
+                            );
+                            let modulated = (base_decay * decay_mult).clamp(0.980, 1.0);
+                            state.ralph_decay_rate.store(
+                                modulated.to_bits(),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            if tick % 60 == 0 {
+                                tracing::info!(
+                                    k_adj = format!("{k_adj:.4}"),
+                                    decay_mult = format!("{decay_mult:.4}"),
+                                    decay = format!("{modulated:.6}"),
+                                    "SYNTHEX thermal → STDP decay modulation"
+                                );
+                            }
                         } else {
                             state.synthex_bridge.record_failure();
                             #[cfg(feature = "intelligence")]
                             state.breaker_failure("synthex");
+                        }
+                    }
+
+                    // Session 078 Flow 2: Poll SYNTHEX Nexus Pull for thermal alerts
+                    // and diagnostic findings. Bidirectional closure: ORAC sends field
+                    // state → SYNTHEX computes PID → SYNTHEX queues alerts → ORAC reads.
+                    #[cfg(feature = "bridges")]
+                    if state.synthex_bridge.should_nexus_pull(tick)
+                        && state.breaker_allows("synthex")
+                    {
+                        match state.synthex_bridge.nexus_pull() {
+                            Ok(events) if !events.is_empty() => {
+                                state.synthex_bridge.set_last_nexus_pull_tick(tick);
+                                for event in &events {
+                                    match event.event_type.as_str() {
+                                        "thermal_alert" => {
+                                            tracing::warn!(
+                                                tick,
+                                                data = %event.data,
+                                                "SYNTHEX thermal alert received"
+                                            );
+                                            // Broadcast to Atuin KV for CC visibility
+                                            let alert = format!(
+                                                "thermal_alert|tick={}|{}",
+                                                tick, event.data
+                                            );
+                                            let _ = std::process::Command::new("atuin")
+                                                .args(["kv", "set", "--key",
+                                                    "habitat.alert.thermal", &alert])
+                                                .stdout(std::process::Stdio::null())
+                                                .stderr(std::process::Stdio::null())
+                                                .status();
+                                        }
+                                        "diagnostic_finding" => {
+                                            tracing::info!(
+                                                tick,
+                                                data = %event.data,
+                                                "SYNTHEX diagnostic finding"
+                                            );
+                                        }
+                                        _ => {
+                                            tracing::debug!(
+                                                tick,
+                                                event_type = %event.event_type,
+                                                "SYNTHEX nexus event (unhandled type)"
+                                            );
+                                        }
+                                    }
+                                }
+                                #[cfg(feature = "intelligence")]
+                                state.breaker_success("synthex");
+                            }
+                            Ok(_) => {
+                                // Empty pull — update tick to prevent re-polling
+                                state.synthex_bridge.set_last_nexus_pull_tick(tick);
+                            }
+                            Err(e) => {
+                                if tick % 30 == 0 {
+                                    tracing::debug!("SYNTHEX nexus pull failed: {e}");
+                                }
+                            }
                         }
                     }
 

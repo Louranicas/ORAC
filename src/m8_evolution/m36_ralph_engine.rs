@@ -1572,6 +1572,7 @@ mod tests {
             description: "test coherence lock".into(),
             tick: 100,
             recommended_action: None,
+            fitness_snapshot: None,
         }).unwrap();
 
         // Run Recognize + Analyze to get to Learn
@@ -1639,6 +1640,7 @@ mod tests {
             description: "thermal spike".into(),
             tick: 100,
             recommended_action: None,
+            fitness_snapshot: None,
         }).unwrap();
 
         let tensor = make_tensor(0.7);

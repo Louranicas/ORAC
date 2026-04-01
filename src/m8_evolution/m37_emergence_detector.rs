@@ -204,6 +204,9 @@ pub struct EmergenceRecord {
     pub ttl: u64,
     /// Optional recommended action.
     pub recommended_action: Option<String>,
+    /// 12D fitness tensor snapshot at detection time (enables causal analysis).
+    /// `None` if fitness tensor was unavailable when emergence was recorded.
+    pub fitness_snapshot: Option<[f64; 12]>,
 }
 
 /// An evidence observation contributing to emergence detection.
@@ -321,6 +324,8 @@ pub struct EmergenceParams {
     pub tick: u64,
     /// Optional recommended action.
     pub recommended_action: Option<String>,
+    /// 12D fitness tensor snapshot at detection time (enables causal analysis).
+    pub fitness_snapshot: Option<[f64; 12]>,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -465,6 +470,7 @@ impl EmergenceDetector {
             detected_at_tick: params.tick,
             ttl: self.config.ttl_ticks,
             recommended_action: params.recommended_action.clone(),
+            fitness_snapshot: params.fitness_snapshot,
         };
 
         {
@@ -526,6 +532,7 @@ impl EmergenceDetector {
                 description: format!("r > {threshold:.3} for {required_ticks} ticks (avg r = {avg_r:.4})"),
                 tick,
                 recommended_action: Some("Reduce K to allow phase differentiation".into()),
+            fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -582,6 +589,7 @@ impl EmergenceDetector {
                 description: format!("Phase gap {max_gap:.3} rad with r = {r:.3}"),
                 tick,
                 recommended_action: Some("Monitor — chimeras can be beneficial".into()),
+            fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -621,6 +629,7 @@ impl EmergenceDetector {
                 description: format!("K slope {k_slope:.4}, r slope {r_slope:.4} over {window} ticks"),
                 tick,
                 recommended_action: Some("Clamp K; investigate why coupling is ineffective".into()),
+            fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -667,6 +676,7 @@ impl EmergenceDetector {
                 ),
                 tick,
                 recommended_action: Some("Adjust STDP rates or add weight randomization".into()),
+            fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -706,6 +716,7 @@ impl EmergenceDetector {
                 description: format!("Temperature {temperature:.2} exceeds damping capacity {damping_capacity:.2}"),
                 tick,
                 recommended_action: Some("Throttle dispatch; allow cooling period".into()),
+            fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -740,6 +751,7 @@ impl EmergenceDetector {
                 description: format!("r improved from {previous_r:.3} to {r:.3}"),
                 tick,
                 recommended_action: None,
+                fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -794,6 +806,7 @@ impl EmergenceDetector {
             ),
             tick,
             recommended_action: None,
+            fitness_snapshot: None,
         })
     }
 
@@ -912,6 +925,7 @@ impl EmergenceDetector {
                 description: desc,
                 tick,
                 recommended_action: Some("Review metabolic health: habitat-metabolic-health".into()),
+            fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -1026,6 +1040,7 @@ impl EmergenceDetector {
                 description: format!("Monitor {monitor_id} fired for {behavior_type}"),
                 tick,
                 recommended_action: None,
+                fitness_snapshot: None,
             })
         } else {
             Ok(None)
@@ -1243,6 +1258,7 @@ mod tests {
             description: description.into(),
             tick,
             recommended_action,
+            fitness_snapshot: None,
         }
     }
 

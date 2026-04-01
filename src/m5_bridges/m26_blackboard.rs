@@ -205,6 +205,42 @@ pub struct SavedCouplingWeight {
     pub weight: f64,
 }
 
+/// A 12D fitness tensor snapshot persisted for post-restart forensics.
+#[derive(Clone, Debug)]
+pub struct FitnessSnapshotRecord {
+    /// Tick at which this snapshot was taken.
+    pub tick: u64,
+    /// RALPH generation at snapshot time.
+    pub generation: u64,
+    /// Overall weighted fitness score `[0.0, 1.0]`.
+    pub overall_score: f64,
+    /// 12 dimension values serialised as JSON array.
+    pub dimensions_json: String,
+    /// Epoch seconds when this record was created.
+    pub created_at: f64,
+}
+
+/// A CC instance decision/learning record for cross-session coordination.
+#[derive(Clone, Debug)]
+pub struct DecisionRecord {
+    /// Unique decision ID.
+    pub decision_id: String,
+    /// Pane/sphere that made the decision.
+    pub pane_id: String,
+    /// High-level task context.
+    pub task: String,
+    /// The decision or learning.
+    pub decision: String,
+    /// Confidence `[0.0, 1.0]`.
+    pub confidence: f64,
+    /// Evidence file paths or references (JSON array).
+    pub evidence_json: String,
+    /// Session identifier.
+    pub session: String,
+    /// Epoch seconds when recorded.
+    pub created_at: f64,
+}
+
 /// `SQLite`-backed shared fleet state.
 ///
 /// Provides persistent storage for pane status, task history, and agent cards.
@@ -407,6 +443,32 @@ impl Blackboard {
                 );
                 CREATE INDEX IF NOT EXISTS idx_povm_context_intensity
                     ON povm_context(intensity DESC);
+
+                CREATE TABLE IF NOT EXISTS fitness_snapshots (
+                    tick            INTEGER NOT NULL,
+                    generation      INTEGER NOT NULL DEFAULT 0,
+                    overall_score   REAL NOT NULL DEFAULT 0.5,
+                    dimensions_json TEXT NOT NULL DEFAULT '[]',
+                    created_at      REAL NOT NULL DEFAULT 0.0,
+                    PRIMARY KEY (tick)
+                );
+                CREATE INDEX IF NOT EXISTS idx_fitness_snapshots_score
+                    ON fitness_snapshots(overall_score DESC);
+
+                CREATE TABLE IF NOT EXISTS cc_decisions (
+                    decision_id     TEXT PRIMARY KEY,
+                    pane_id         TEXT NOT NULL,
+                    task            TEXT NOT NULL DEFAULT '',
+                    decision        TEXT NOT NULL DEFAULT '',
+                    confidence      REAL NOT NULL DEFAULT 0.5,
+                    evidence_json   TEXT NOT NULL DEFAULT '[]',
+                    session         TEXT NOT NULL DEFAULT '',
+                    created_at      REAL NOT NULL DEFAULT 0.0
+                );
+                CREATE INDEX IF NOT EXISTS idx_cc_decisions_pane
+                    ON cc_decisions(pane_id);
+                CREATE INDEX IF NOT EXISTS idx_cc_decisions_task
+                    ON cc_decisions(task);
                 ",
             )
             .map_err(|e| PvError::Database(format!("migrate: {e}")))?;
@@ -1451,6 +1513,147 @@ impl Blackboard {
             )
             .map_err(|e| PvError::Database(format!("compact_coupling_weights: {e}")))?;
         Ok(deleted)
+    }
+
+    // ── Fitness tensor snapshots ──
+
+    /// Insert a 12D fitness tensor snapshot for post-restart forensics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn insert_fitness_snapshot(&self, record: &FitnessSnapshotRecord) -> PvResult<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO fitness_snapshots \
+                 (tick, generation, overall_score, dimensions_json, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    record.tick,
+                    record.generation,
+                    record.overall_score,
+                    record.dimensions_json,
+                    record.created_at,
+                ],
+            )
+            .map_err(|e| PvError::Database(format!("insert fitness_snapshot: {e}")))?;
+        Ok(())
+    }
+
+    /// Retrieve recent fitness snapshots, most recent first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn recent_fitness_snapshots(&self, limit: u32) -> PvResult<Vec<FitnessSnapshotRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT tick, generation, overall_score, dimensions_json, created_at \
+                 FROM fitness_snapshots ORDER BY tick DESC LIMIT ?1",
+            )
+            .map_err(|e| PvError::Database(format!("prepare recent_fitness: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(FitnessSnapshotRecord {
+                    tick: row.get(0)?,
+                    generation: row.get(1)?,
+                    overall_score: row.get(2)?,
+                    dimensions_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|e| PvError::Database(format!("recent_fitness query: {e}")))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(
+                row.map_err(|e| PvError::Database(format!("fitness_snapshot row: {e}")))?,
+            );
+        }
+        Ok(records)
+    }
+
+    // ── CC decision ledger ──
+
+    /// Insert a CC instance decision/learning record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn insert_decision(&self, record: &DecisionRecord) -> PvResult<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO cc_decisions \
+                 (decision_id, pane_id, task, decision, confidence, \
+                  evidence_json, session, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    record.decision_id,
+                    record.pane_id,
+                    record.task,
+                    record.decision,
+                    record.confidence,
+                    record.evidence_json,
+                    record.session,
+                    record.created_at,
+                ],
+            )
+            .map_err(|e| PvError::Database(format!("insert cc_decision: {e}")))?;
+        Ok(())
+    }
+
+    /// Query CC decisions by task keyword (substring match).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn decisions_by_task(&self, task_query: &str, limit: u32) -> PvResult<Vec<DecisionRecord>> {
+        let pattern = format!("%{task_query}%");
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT decision_id, pane_id, task, decision, confidence, \
+                 evidence_json, session, created_at \
+                 FROM cc_decisions WHERE task LIKE ?1 \
+                 ORDER BY created_at DESC LIMIT ?2",
+            )
+            .map_err(|e| PvError::Database(format!("prepare decisions_by_task: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![pattern, limit], |row| {
+                Ok(DecisionRecord {
+                    decision_id: row.get(0)?,
+                    pane_id: row.get(1)?,
+                    task: row.get(2)?,
+                    decision: row.get(3)?,
+                    confidence: row.get(4)?,
+                    evidence_json: row.get(5)?,
+                    session: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| PvError::Database(format!("decisions_by_task query: {e}")))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(
+                row.map_err(|e| PvError::Database(format!("cc_decision row: {e}")))?,
+            );
+        }
+        Ok(records)
+    }
+
+    /// Count total CC decisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PvError::Database`] on SQL failure.
+    pub fn decision_count(&self) -> PvResult<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM cc_decisions", [], |row| row.get(0))
+            .map_err(|e| PvError::Database(format!("decision_count: {e}")))
     }
 }
 

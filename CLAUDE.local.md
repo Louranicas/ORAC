@@ -833,3 +833,133 @@ CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
 
 ## Working Directory
 `/home/louranicas/claude-code-workspace/orac-sidecar`
+
+---
+
+## CC Inter-Instance Coordination Pathways (Session 078)
+
+> **Full reference:** `ai_docs/CC_COORDINATION_PATHWAYS.md` | **Quick ref:** `ai_docs/CC_COORDINATION_QUICK_REFERENCE.md`
+> **POVM:** 8 entities + 14 relations (CC_Coordination_Pathways graph)
+
+### Composition Matrix: When to Use Each Pathway
+
+┌──────────────────────────────────────┬──────────────────────────────────────┬───────────────────────────────────────────────┐
+│               Scenario               │             Best Pathway             │                      Why                      │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Quick parallel subtask (same branch) │ Agent                                │ Auto-managed, returns structured result        │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Multi-branch feature sprint          │ Agent + worktree                     │ Zero contention, auto-cleanup                 │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Long background research             │ Agent run_in_background              │ Non-blocking, notified on completion          │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ DAG of dependent tasks               │ Task Queue                           │ Natural dependency resolution                 │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Send command to specific pane        │ Zellij dispatch                      │ Direct, verified, audited                     │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Broadcast same command to all        │ Zellij broadcast                     │ sync-tab or serial dispatch                   │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Context exhaustion                   │ Cascade handoff                      │ Automatic, preserves decisions                │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Typed sphere-to-sphere RPC           │ PV2 Request/Response                 │ Correlation-ID tracked round-trip             │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Field-driven task routing            │ PV2 TaskSubmit(FieldDriven)          │ Kuramoto phase-matched routing                │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Real-time ecosystem awareness        │ ORAC hooks                           │ Automatic, every prompt injection             │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Cross-session learning               │ ORAC hooks (POVM/RM crystallization) │ SessionStart hydrates, Stop crystallizes      │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ All services down                    │ Shared filesystem                    │ Always works, no dependencies                 │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Human wants to observe progress      │ Zellij dispatch                      │ Can watch live, ctrl+C to intervene           │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Scheduled recurring work             │ RemoteTrigger                        │ Cron-style, isolated CC instances             │
+├──────────────────────────────────────┼──────────────────────────────────────┼───────────────────────────────────────────────┤
+│ Event streaming with backpressure    │ PV2 sidecar mode                     │ Auto-reconnect, rate-limited, circuit-breaker │
+└──────────────────────────────────────┴──────────────────────────────────────┴───────────────────────────────────────────────┘
+
+### The Full Stack Diagram
+
+```
+                    ┌─────────────────────────────┐
+                    │  Pathway 1: Agent Tool       │
+                    │  (Native subagent spawning)   │
+                    │  Worktree isolation           │
+                    └──────────┬──────────────────┘
+                               │
+                    ┌──────────┴──────────────────┐
+                    │  Pathway 2: Task Queue       │
+                    │  (DAG dependency graph)       │
+                    │  TaskCreate/Update/List       │
+                    └──────────┬──────────────────┘
+                               │
+┌──────────────────────────────┼──────────────────────────────┐
+│                              │                              │
+│  Pathway 3: Zellij IPC      │  Pathway 4: Cascade          │
+│  (cc-dispatch, fleet-ctl)    │  (handoff-dispatch.sh)        │
+│  Physical pane transport     │  Context-preserving transfer  │
+│  9 panes × 3 tabs           │  PreCompact → idle pane       │
+│                              │                              │
+└──────────────┬───────────────┴──────────────┬───────────────┘
+               │                              │
+    ┌──────────┴──────────────────────────────┴───────────┐
+    │           Pathway 5: PV2 IPC Bus                     │
+    │  Unix socket: /run/user/1000/pane-vortex-bus.sock   │
+    │  NDJSON frames: TaskSubmit, Request/Response,        │
+    │  CascadeHandoff, Event subscriptions                 │
+    │  Kuramoto field: r, K, phase coupling                │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+    ┌──────────────────────┴──────────────────────────────┐
+    │           Pathway 6: ORAC Hook System                │
+    │  6 hooks → HTTP POST to :8133                        │
+    │  SessionStart: register sphere + hydrate             │
+    │  PostToolUse: poll tasks + claim + memory             │
+    │  UserPromptSubmit: inject field state + tasks         │
+    │  Stop: crystallize + deregister                       │
+    │  systemMessage injection → bidirectional awareness    │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+    ┌──────────────────────┴──────────────────────────────┐
+    │           Pathway 7: Shared Filesystem               │
+    │  cascade-state.json, handoff briefs, fleet-state     │
+    │  Always works, zero dependencies                     │
+    └─────────────────────────────────────────────────────┘
+```
+
+### Key Scripts & Tools Reference
+
+┌────────────────────────────┬──────────────────────────────────┬───────────┐
+│            Tool            │               Path               │  Pathway  │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ Agent()                    │ Built-in CC tool                 │ 1         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ TaskCreate/Update/List/Get │ Built-in CC tools                │ 2         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ cc-dispatch                │ ~/.local/bin/cc-dispatch         │ 3         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ fleet-ctl                  │ ~/.local/bin/fleet-ctl           │ 3         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ fleet-inventory.sh         │ ~/.local/bin/fleet-inventory.sh  │ 3         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ fleet-nav.sh               │ ~/.local/bin/fleet-nav.sh        │ 3         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ cc-common.sh               │ ~/.local/bin/cc-common.sh        │ 3         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ handoff-dispatch.sh        │ ~/.local/bin/handoff-dispatch.sh │ 4         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ cc-cascade                 │ ~/.local/bin/cc-cascade          │ 4         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ fleet-heartbeat            │ ~/.local/bin/fleet-heartbeat     │ 4         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ pane-vortex-client         │ ~/.local/bin/pane-vortex-client  │ 5         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ orac-hook.sh               │ orac-sidecar/hooks/orac-hook.sh  │ 6         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ swarm-env.sh               │ ~/.local/bin/swarm-env.sh        │ All       │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ EnterWorktree/ExitWorktree │ Built-in CC tools                │ 1         │
+├────────────────────────────┼──────────────────────────────────┼───────────┤
+│ RemoteTrigger              │ Built-in CC tool                 │ Scheduled │
+└────────────────────────────┴──────────────────────────────────┴───────────┘
+
+All 7 pathways compose — an orchestrator on Tab 1 can use Agent+worktree for parallel work, Task Queue for dependency tracking, Zellij dispatch for fleet commands, Cascade for context transfer, PV2 bus for typed messaging, ORAC hooks for ecosystem awareness, and shared filesystem as the durable backbone.

@@ -150,6 +150,8 @@ impl ThermalResponse {
 struct BridgeState {
     /// Last poll tick number.
     last_poll_tick: u64,
+    /// Last Nexus Pull tick (independent of thermal poll timing).
+    last_nexus_pull_tick: u64,
     /// Cached adjustment from the last successful poll.
     cached_adjustment: f64,
     /// Whether the cached value is stale.
@@ -164,6 +166,7 @@ impl Default for BridgeState {
     fn default() -> Self {
         Self {
             last_poll_tick: 0,
+            last_nexus_pull_tick: 0,
             cached_adjustment: 1.0,
             stale: true,
             consecutive_failures: 0,
@@ -381,10 +384,18 @@ impl SynthexBridge {
     }
 
     /// Check whether a Nexus Bus pull is due at the given tick.
+    ///
+    /// Uses an independent tick counter (`last_nexus_pull_tick`) so
+    /// pull timing is decoupled from thermal poll timing.
     #[must_use]
     pub fn should_nexus_pull(&self, current_tick: u64) -> bool {
         let state = self.state.read();
-        current_tick.saturating_sub(state.last_poll_tick) >= NEXUS_PULL_INTERVAL
+        current_tick.saturating_sub(state.last_nexus_pull_tick) >= NEXUS_PULL_INTERVAL
+    }
+
+    /// Record the tick at which the last Nexus Pull completed.
+    pub fn set_last_nexus_pull_tick(&self, tick: u64) {
+        self.state.write().last_nexus_pull_tick = tick;
     }
 
     /// Create a field update event for the Nexus Bus.
@@ -1128,17 +1139,26 @@ mod tests {
     #[test]
     fn should_nexus_pull_respects_interval() {
         let bridge = SynthexBridge::with_config("localhost:8090", 6);
-        bridge.set_last_poll_tick(10);
-        // NEXUS_PULL_INTERVAL = 3, tick 13 = 3 ticks since last poll
+        bridge.set_last_nexus_pull_tick(10);
+        // NEXUS_PULL_INTERVAL = 3, tick 13 = 3 ticks since last pull
         assert!(bridge.should_nexus_pull(13));
     }
 
     #[test]
     fn should_nexus_pull_too_soon() {
         let bridge = SynthexBridge::with_config("localhost:8090", 6);
-        bridge.set_last_poll_tick(10);
-        // Only 1 tick since last poll
+        bridge.set_last_nexus_pull_tick(10);
+        // Only 1 tick since last pull
         assert!(!bridge.should_nexus_pull(11));
+    }
+
+    #[test]
+    fn nexus_pull_independent_of_thermal_poll() {
+        let bridge = SynthexBridge::with_config("localhost:8090", 6);
+        // Thermal poll at tick 10 should NOT affect Nexus Pull timing
+        bridge.set_last_poll_tick(10);
+        // Nexus Pull last at tick 0 (default) — should be due at tick 3+
+        assert!(bridge.should_nexus_pull(5));
     }
 
     // ── Nexus Bus constants ──

@@ -3510,6 +3510,7 @@ mod tests {
             detected_at_tick: 42,
             ttl: 500,
             recommended_action: None,
+            fitness_snapshot: None,
         };
         let json = serde_json::json!({
             "type": record.emergence_type.to_string(),
