@@ -202,6 +202,42 @@ fn hydrate_startup_state(state: &OracState) {
         }
     }
 
+    // 2b. Register saved sessions as PV2 spheres for coupling network population.
+    // Session 081: Without this, step 3 coupling weight hydration finds 0 connections
+    // because PV2 has no spheres at startup. This closes the coupling amnesia gap.
+    #[cfg(feature = "persistence")]
+    {
+        let sessions = state.sessions.read();
+        let mut registered = 0u32;
+        for (_sid, tracker) in sessions.iter() {
+            if tracker.persona.is_empty() {
+                continue;
+            }
+            let _url = format!("{}/sphere/{}/register", state.pv2_url, tracker.pane_id.as_str());
+            let body = serde_json::json!({
+                "persona": tracker.persona,
+                "frequency": 0.1,
+            })
+            .to_string();
+            // Use raw_http_post (already imported) instead of fire_and_forget_post
+            // (which is in the hook server module and requires async context).
+            if orac_sidecar::m5_bridges::http_helpers::raw_http_post(
+                &state.pv2_url.replace("http://", ""),
+                &format!("/sphere/{}/register", tracker.pane_id.as_str()),
+                body.as_bytes(),
+                "pv2",
+            ).is_ok() {
+                registered += 1;
+            }
+        }
+        drop(sessions);
+        if registered > 0 {
+            // Brief pause to let PV2 process registrations before weight hydration
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            tracing::info!(registered, "Saved sessions registered as PV2 spheres for coupling hydration");
+        }
+    }
+
     // 3. Coupling weights from blackboard (preferred — exact sphere IDs, no namespace mismatch)
     #[cfg(all(feature = "persistence", feature = "intelligence"))]
     if let Some(bb) = state.blackboard() {
@@ -2425,6 +2461,39 @@ fn spawn_ralph_loop(
                                         learning = learning_delta,
                                         integration = integration_delta,
                                         "ME EventBus activity detected"
+                                    );
+                                }
+                                // Session 081: Feed ME learning events into RALPH correlation.
+                                // ME observes 571K+ correlations and detects emergences but
+                                // previously nobody consumed them. This closes the gap.
+                                #[cfg(feature = "evolution")]
+                                if learning_delta > 0 {
+                                    let corr = state.ralph.correlation();
+                                    #[allow(clippy::cast_precision_loss)]
+                                    let relevance = (learning_delta as f64 / 10.0).min(1.0);
+                                    corr.ingest(
+                                        "me_learning",
+                                        "evolution",
+                                        relevance,
+                                        tick,
+                                        Some(&format!("ME learning: {learning_delta} new events")),
+                                    );
+                                    tracing::info!(
+                                        learning_delta,
+                                        "ME learning events fed to RALPH correlation engine"
+                                    );
+                                }
+                                #[cfg(feature = "evolution")]
+                                if integration_delta > 0 {
+                                    let corr = state.ralph.correlation();
+                                    #[allow(clippy::cast_precision_loss)]
+                                    let relevance = (integration_delta as f64 / 100.0).min(1.0);
+                                    corr.ingest(
+                                        "me_integration",
+                                        "field_state",
+                                        relevance,
+                                        tick,
+                                        Some(&format!("ME integration: {integration_delta} new events")),
                                     );
                                 }
                             }
