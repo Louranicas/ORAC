@@ -593,9 +593,10 @@ fn feed_emergence_observations(
 
     // 3. Hebbian saturation detection (every 12 ticks to reduce overhead)
     if tick % 12 == 0 && !weights.is_empty() {
-        // Gen-063a: Use STDP soft ceiling (0.85) not theoretical max (1.0)
+        // Gen-063a: Use STDP soft ceiling (0.75) not theoretical max (1.0)
+        // Session 080 BUG: was 0.85 but m18 ceiling is 0.75 since Session 072
         // so saturation detector fires when weights approach the actual learning bound.
-        match detector.detect_hebbian_saturation(&weights, 0.15, 0.85, tick) {
+        match detector.detect_hebbian_saturation(&weights, 0.15, 0.75, tick) {
             Ok(Some(id)) => tracing::info!(id, "Emergence: HebbianSaturation detected"),
             Err(e) => tracing::debug!("Emergence hebbian_saturation check error: {e}"),
             _ => {}
@@ -738,6 +739,37 @@ fn feed_emergence_observations(
             }
         }
     }
+
+    // 9. DegenerateMode detection (every 50 ticks — systemic health watchdog)
+    // Session 080: Was implemented in m37 but NEVER WIRED. This is the system's
+    // last line of defense against metabolic death. Checks 6 stagnation indicators.
+    #[cfg(feature = "evolution")]
+    if tick % 50 == 0 && tick > 100 {
+        let ltp = state.hebbian_ltp_total.load(std::sync::atomic::Ordering::Relaxed);
+        let ltd = state.hebbian_ltd_total.load(std::sync::atomic::Ordering::Relaxed);
+        #[allow(clippy::cast_precision_loss)] // connection count bounded by SPHERE_CAP^2
+        let weight_mean = {
+            let net = state.coupling.read();
+            if net.connections.is_empty() { 0.0 } else {
+                net.connections.iter().map(|c| c.weight).sum::<f64>()
+                    / net.connections.len() as f64
+            }
+        };
+        let decision_action = state.field_state.read().prev_decision_action.to_string();
+        let snapshot = orac_sidecar::m8_evolution::m37_emergence_detector::DegenerateSnapshot {
+            ltp_total: ltp,
+            ltd_total: ltd,
+            weight_mean,
+            r_history: r_slice.to_vec(),
+            decision_action,
+            last_decision_change_tick: 0, // No tick tracked on OracState; fallback per spec
+        };
+        match detector.detect_degenerate_mode(&snapshot, tick) {
+            Ok(Some(id)) => tracing::warn!(id, "Emergence: DegenerateMode detected — system may be metabolically dead"),
+            Err(e) => tracing::debug!("Emergence degenerate_mode check error: {e}"),
+            _ => {}
+        }
+    }
 }
 
 /// Post field state to SYNTHEX `/api/ingest` endpoint (METABOLIC-GAP-1 fix).
@@ -746,7 +778,7 @@ fn feed_emergence_observations(
 /// - HS-001 (`r`): Kuramoto order parameter from cached field state
 /// - HS-002 (`cascade_heat`): tool call rate since last post (normalized)
 /// - HS-003 (`me_fitness`): RALPH current fitness
-/// - HS-004 (`nexus_health`): breaker closed fraction or sphere count fallback
+/// - HS-004 (`cross_sync`): breaker health (1.0 when all closed, 0.0 when all open)
 #[cfg(all(feature = "bridges", feature = "evolution"))]
 #[allow(clippy::items_after_statements, clippy::too_many_lines)] // static follows use; 7 heat source computations
 fn post_field_to_synthex(state: &OracState, tick: u64) {
@@ -774,12 +806,12 @@ fn post_field_to_synthex(state: &OracState, tick: u64) {
             { closed as f64 / total as f64 }
         } else {
             #[allow(clippy::cast_precision_loss)]
-            { (sphere_count as f64 / 10.0).min(1.0) }
+            { (sphere_count as f64 / 30.0).min(1.0) }
         }
     };
     #[cfg(not(feature = "intelligence"))]
     #[allow(clippy::cast_precision_loss)]
-    let nexus_health = (sphere_count as f64 / 10.0).min(1.0);
+    let nexus_health = (sphere_count as f64 / 30.0).min(1.0);
 
     // Compute cascade_heat from tool call rate (tools per 6-tick window, normalized)
     let current_calls = state.total_tool_calls.load(Ordering::Relaxed);
@@ -1759,10 +1791,11 @@ fn spawn_ralph_loop(
                             let w_mean = net.connections.iter().map(|c| c.weight).sum::<f64>() / n;
                             let floor = orac_sidecar::m1_core::m04_constants::HEBBIAN_WEIGHT_FLOOR;
                             let mut nudged = 0u32;
-                            // BUG-064a fix: Use soft ceiling (0.85) and wider epsilon (0.01).
+                            // BUG-064a fix: Use soft ceiling (0.75) and wider epsilon (0.01).
+                            // Session 080: was 0.85 but m18 HEBBIAN_SOFT_CEILING is 0.75
                             // Previous code checked weight==1.0 (never true since STDP
                             // caps at 0.85) and floor with 1e-10 epsilon (too tight).
-                            let soft_ceiling = 0.85_f64;
+                            let soft_ceiling = 0.75_f64;
                             for conn in &mut net.connections {
                                 let old = conn.weight;
                                 if (conn.weight - soft_ceiling).abs() < 0.01 {
