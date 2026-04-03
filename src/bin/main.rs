@@ -126,6 +126,7 @@ async fn main() {
 /// Called once at startup to restore state across ORAC restarts.
 /// Logs results for each hydration step — failures are non-fatal.
 #[cfg(feature = "api")]
+#[allow(clippy::too_many_lines)]
 fn hydrate_startup_state(state: &OracState) {
     // 1. RALPH evolution state from blackboard
     #[cfg(all(feature = "persistence", feature = "evolution"))]
@@ -137,10 +138,35 @@ fn hydrate_startup_state(state: &OracState) {
                     saved.completed_cycles,
                     saved.peak_fitness,
                 );
+                // Restore 4 AtomicU64 runtime params (Session 079 convergence trap fix)
+                // MUST also update selector so apply_ralph_mutations() propagates
+                // restored values instead of overwriting with defaults on tick 1.
+                let selector = state.ralph.selector();
+                if saved.k_mod_bits != 0 {
+                    state.ralph_k_mod.store(saved.k_mod_bits, std::sync::atomic::Ordering::Relaxed);
+                    let _ = selector.update_value("k_mod", f64::from_bits(saved.k_mod_bits));
+                }
+                if saved.hebbian_ltp_bits != 0 {
+                    state.ralph_hebbian_ltp.store(saved.hebbian_ltp_bits, std::sync::atomic::Ordering::Relaxed);
+                    let _ = selector.update_value("hebbian_ltp", f64::from_bits(saved.hebbian_ltp_bits));
+                }
+                if saved.decay_rate_bits != 0 {
+                    state.ralph_decay_rate.store(saved.decay_rate_bits, std::sync::atomic::Ordering::Relaxed);
+                    let _ = selector.update_value("decay_rate", f64::from_bits(saved.decay_rate_bits));
+                }
+                if saved.tick_interval_ms != 0 {
+                    state.ralph_tick_interval_ms.store(saved.tick_interval_ms, std::sync::atomic::Ordering::Relaxed);
+                    #[allow(clippy::cast_precision_loss)]
+                    let _ = selector.update_value("tick_interval", saved.tick_interval_ms as f64 / 1000.0);
+                }
                 tracing::info!(
                     gen = saved.generation,
                     fitness = format!("{:.4}", saved.current_fitness),
                     phase = saved.last_phase,
+                    k_mod = format!("{:.4}", f64::from_bits(saved.k_mod_bits)),
+                    ltp = format!("{:.4}", f64::from_bits(saved.hebbian_ltp_bits)),
+                    decay = format!("{:.6}", f64::from_bits(saved.decay_rate_bits)),
+                    tick_ms = saved.tick_interval_ms,
                     "RALPH state loaded from blackboard"
                 );
             }
@@ -1907,6 +1933,10 @@ fn spawn_ralph_loop(
                                 total_accepted: agg.total_accepted,
                                 total_rolled_back: agg.total_rolled_back,
                                 last_phase: rs.phase.name().to_owned(),
+                                k_mod_bits: state.ralph_k_mod.load(std::sync::atomic::Ordering::Relaxed),
+                                hebbian_ltp_bits: state.ralph_hebbian_ltp.load(std::sync::atomic::Ordering::Relaxed),
+                                decay_rate_bits: state.ralph_decay_rate.load(std::sync::atomic::Ordering::Relaxed),
+                                tick_interval_ms: state.ralph_tick_interval_ms.load(std::sync::atomic::Ordering::Relaxed),
                             };
                             if let Err(e) = bb.save_ralph_state(&saved) {
                                 tracing::debug!("RALPH state save failed: {e}");
@@ -1931,6 +1961,26 @@ fn spawn_ralph_loop(
                             drop(sessions_guard);
                             if let Err(e) = bb.save_sessions(&saved_sessions) {
                                 tracing::debug!("Session save failed: {e}");
+                            }
+
+                            // Session 079 Phase 2: Reap stale sessions (>15min, not in PV2 spheres)
+                            let fs = state.field_state.read();
+                            let live_panes: std::collections::HashSet<_> = fs.spheres.keys().cloned().collect();
+                            drop(fs);
+                            #[allow(clippy::cast_possible_truncation)]
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0u64, |d| d.as_millis() as u64);
+                            let stale_cutoff_ms = now_ms.saturating_sub(900_000); // 15 minutes
+                            let mut sessions_w = state.sessions.write();
+                            let before = sessions_w.len();
+                            sessions_w.retain(|_sid, t| {
+                                live_panes.contains(&t.pane_id) || t.started_ms > stale_cutoff_ms
+                            });
+                            let reaped = before - sessions_w.len();
+                            drop(sessions_w);
+                            if reaped > 0 {
+                                tracing::info!(reaped, remaining = before - reaped, "Stale sessions reaped");
                             }
 
                             // IGNITION-1e: Persist coupling weights to blackboard

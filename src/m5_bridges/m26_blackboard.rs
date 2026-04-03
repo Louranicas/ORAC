@@ -192,6 +192,14 @@ pub struct SavedRalphState {
     pub total_rolled_back: u64,
     /// Last RALPH phase name.
     pub last_phase: String,
+    /// Runtime `k_mod` (coupling modulation) — `f64` bits stored as `u64`.
+    pub k_mod_bits: u64,
+    /// Runtime `hebbian_ltp` rate — `f64` bits stored as `u64`.
+    pub hebbian_ltp_bits: u64,
+    /// Runtime `decay_rate` — `f64` bits stored as `u64`.
+    pub decay_rate_bits: u64,
+    /// Runtime `tick_interval` in milliseconds.
+    pub tick_interval_ms: u64,
 }
 
 /// Persisted coupling weight for cross-restart hydration.
@@ -411,6 +419,10 @@ impl Blackboard {
                     total_accepted      INTEGER NOT NULL DEFAULT 0,
                     total_rolled_back   INTEGER NOT NULL DEFAULT 0,
                     last_phase          TEXT NOT NULL DEFAULT 'Recognize',
+                    k_mod_bits          INTEGER NOT NULL DEFAULT 0,
+                    hebbian_ltp_bits    INTEGER NOT NULL DEFAULT 0,
+                    decay_rate_bits     INTEGER NOT NULL DEFAULT 0,
+                    tick_interval_ms    INTEGER NOT NULL DEFAULT 0,
                     updated_at          REAL NOT NULL DEFAULT 0.0
                 );
 
@@ -472,6 +484,19 @@ impl Blackboard {
                 ",
             )
             .map_err(|e| PvError::Database(format!("migrate: {e}")))?;
+
+        // Session 079: Add RALPH AtomicU64 columns to existing ralph_state table.
+        // CREATE TABLE IF NOT EXISTS won't add columns to an already-existing table.
+        // ALTER TABLE errors on "duplicate column name" are expected and silently ignored.
+        for col_def in [
+            "ALTER TABLE ralph_state ADD COLUMN k_mod_bits INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ralph_state ADD COLUMN hebbian_ltp_bits INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ralph_state ADD COLUMN decay_rate_bits INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ralph_state ADD COLUMN tick_interval_ms INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = self.conn.execute_batch(col_def);
+        }
+
         Ok(())
     }
 
@@ -1236,11 +1261,13 @@ impl Blackboard {
             .execute(
                 "INSERT INTO ralph_state (id, generation, completed_cycles, current_fitness, \
                  peak_fitness, total_proposed, total_accepted, total_rolled_back, last_phase, \
-                 updated_at) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 k_mod_bits, hebbian_ltp_bits, decay_rate_bits, tick_interval_ms, \
+                 updated_at) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
                  ON CONFLICT(id) DO UPDATE SET \
                  generation=?1, completed_cycles=?2, current_fitness=?3, peak_fitness=?4, \
                  total_proposed=?5, total_accepted=?6, total_rolled_back=?7, last_phase=?8, \
-                 updated_at=?9",
+                 k_mod_bits=?9, hebbian_ltp_bits=?10, decay_rate_bits=?11, tick_interval_ms=?12, \
+                 updated_at=?13",
                 rusqlite::params![
                     rs.generation,
                     rs.completed_cycles,
@@ -1250,6 +1277,10 @@ impl Blackboard {
                     rs.total_accepted,
                     rs.total_rolled_back,
                     rs.last_phase,
+                    rs.k_mod_bits,
+                    rs.hebbian_ltp_bits,
+                    rs.decay_rate_bits,
+                    rs.tick_interval_ms,
                     now,
                 ],
             )
@@ -1267,7 +1298,8 @@ impl Blackboard {
             .conn
             .prepare(
                 "SELECT generation, completed_cycles, current_fitness, peak_fitness, \
-                 total_proposed, total_accepted, total_rolled_back, last_phase \
+                 total_proposed, total_accepted, total_rolled_back, last_phase, \
+                 k_mod_bits, hebbian_ltp_bits, decay_rate_bits, tick_interval_ms \
                  FROM ralph_state WHERE id = 1",
             )
             .map_err(|e| PvError::Database(format!("prepare load ralph_state: {e}")))?;
@@ -1283,6 +1315,10 @@ impl Blackboard {
                     total_accepted: row.get(5)?,
                     total_rolled_back: row.get(6)?,
                     last_phase: row.get(7)?,
+                    k_mod_bits: row.get(8)?,
+                    hebbian_ltp_bits: row.get(9)?,
+                    decay_rate_bits: row.get(10)?,
+                    tick_interval_ms: row.get(11)?,
                 })
             })
             .optional()
