@@ -1538,7 +1538,13 @@ async fn health_handler(
         port: state.config.server.port,
         sessions: state.session_count(),
         uptime_ticks: state.tick.load(Ordering::Relaxed),
-        field_r: state.field_state.read().field.order.r,
+        // Session 082: When <3 spheres, report r=0.5 (neutral) instead of
+        // mathematically guaranteed r=1.0. Prevents CC instances from generating
+        // false [NEXUS ALERT] spam. The raw r is still available in /field.
+        field_r: {
+            let fs = state.field_state.read();
+            if fs.spheres.len() < 3 { 0.5 } else { fs.field.order.r }
+        },
         sphere_count: state.field_state.read().spheres.len(),
         #[cfg(feature = "evolution")]
         ralph_gen: ralph_state.generation,
