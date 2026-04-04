@@ -682,6 +682,12 @@ impl OracState {
     /// warning and replace it. The old session's sphere should be deregistered
     /// by the caller (`SessionStart` handler) to prevent orphan connections.
     pub fn register_session(&self, session_id: &str, pane_id: PaneId) {
+        // Session 082: Assign sequential persona for stable cross-restart identity.
+        let persona = {
+            let sessions = self.sessions.read();
+            let next_idx = sessions.len() + 1;
+            format!("cc-{next_idx:02}")
+        };
         let tracker = SessionTracker {
             pane_id,
             active_task_id: None,
@@ -689,7 +695,7 @@ impl OracState {
             poll_counter: 0,
             total_tool_calls: 0,
             started_ms: epoch_ms(),
-            persona: String::new(),
+            persona,
         };
         let mut sessions = self.sessions.write();
         if let Some(old) = sessions.insert(session_id.to_owned(), tracker) {
