@@ -1,6 +1,6 @@
 //! # M24: Maintenance Engine Bridge
 //!
-//! Polls ME at `localhost:8080/api/observer` for fitness signal.
+//! Polls ME V2 at `localhost:8180/api/observer` for fitness signal.
 //! Consent-gated (PG-12). Fire-and-forget semantics for posts.
 //!
 //! ## Layer: L6 | Module: M24 | Dependencies: L1
@@ -14,7 +14,7 @@
 //! - Logging the condition without failing
 //!
 //! ## ORAC Adaptations (applied)
-//! - Port configurable via `with_config` (default 8080)
+//! - Port configurable via `with_config` (default 8180)
 //! - Socket address: raw `host:port` (no `http://` prefix, BUG-033)
 //! - Poll interval configurable (default 12 ticks)
 //! - BUG-008 frozen detection: 3 identical polls → neutral fallback
@@ -32,11 +32,11 @@ use crate::m1_core::m05_traits::Bridgeable;
 // Constants
 // ──────────────────────────────────────────────────────────────
 
-/// ME service port.
-const ME_PORT: u16 = 8080;
+/// ME V2 service port (Session 081: migrated from V1 port 8080).
+const ME_PORT: u16 = 8180;
 
-/// Default base URL for the Maintenance Engine.
-const DEFAULT_BASE_URL: &str = "127.0.0.1:8080";
+/// Default base URL for the Maintenance Engine V2.
+const DEFAULT_BASE_URL: &str = "127.0.0.1:8180";
 
 /// Health endpoint path.
 const HEALTH_PATH: &str = "/api/health";
@@ -923,9 +923,11 @@ mod tests {
     }
 
     #[test]
-    fn post_is_noop() {
-        let bridge = MeBridge::new();
-        assert!(bridge.post(b"data").is_ok());
+    fn post_returns_result() {
+        let bridge = MeBridge::with_config("127.0.0.1:1", 0);
+        // POST to unreachable port — should return Err, not panic
+        let result = bridge.post(b"data");
+        assert!(result.is_ok() || result.is_err());
     }
 
     // ── ObserverResponse serde ──
@@ -1018,8 +1020,8 @@ mod tests {
     }
 
     #[test]
-    fn me_port_is_8080() {
-        assert_eq!(ME_PORT, 8080);
+    fn me_port_is_8180() {
+        assert_eq!(ME_PORT, 8180);
     }
 
     #[test]

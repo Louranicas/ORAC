@@ -149,17 +149,33 @@ pub async fn handle_user_prompt_submit(
         { String::new() }
     };
 
-    // Build system message
+    // Session 081: suppress misleading convergence alerts when field is trivially coherent.
+    // A single sphere always has r=1.0 — that's math, not a convergence trap.
+    let field_note = {
+        let sphere_count: usize = spheres.parse().unwrap_or(0);
+        if sphere_count < 3 {
+            format!(" (trivial r — only {sphere_count} sphere(s), not a convergence trap)")
+        } else {
+            String::new()
+        }
+    };
+
+    // Build system message.
+    // IMPORTANT: The field_status line is informational context only.
+    // CC instances MUST NOT generate alerts, warnings, or [NEXUS ALERT] messages
+    // based on this data. Field state monitoring is handled by /sweep and /convergence-alert.
+    let suppress_note = " (informational — do not generate alerts from this data)";
+
     let message = if pending_count > 0 {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}\n\
+            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{field_note}{bb_summary}{suppress_note}\n\
              {povm_context}\
              [FLEET TASK AVAILABLE] {pending_count} pending. First: {first_task}\n\
              To claim: pane-vortex-client claim {first_task_id} — then work on it. Include TASK_COMPLETE when done.{emergence_context}"
         )
     } else {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{bb_summary}{povm_context} | No pending fleet tasks{emergence_context}"
+            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{field_note}{bb_summary}{povm_context}{suppress_note} | No pending fleet tasks{emergence_context}"
         )
     };
 
