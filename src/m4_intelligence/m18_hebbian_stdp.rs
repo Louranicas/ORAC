@@ -117,7 +117,10 @@ pub fn apply_stdp_with_ltp<S: std::hash::BuildHasher>(
                     ltp *= m04_constants::HEBBIAN_NEWCOMER_MULTIPLIER;
                 }
 
-                ltp
+                // Session 081 ACP: Multiplicative STDP — LTP shrinks near ceiling.
+                // Prevents bimodal weight collapse by creating natural equilibrium ~0.45.
+                let range = HEBBIAN_SOFT_CEILING - m04_constants::HEBBIAN_WEIGHT_FLOOR;
+                ltp * ((HEBBIAN_SOFT_CEILING - conn.weight).max(0.01) / range)
             } else if either_working {
                 // G3 idle-gating: skip LTD for truly phantom spheres that have
                 // never participated in the Kuramoto field (`total_steps == 0`).
@@ -140,7 +143,10 @@ pub fn apply_stdp_with_ltp<S: std::hash::BuildHasher>(
                 let damping = (f64::from(working_u32) * 3.0
                     / f64::from(idle_u32))
                 .min(1.0);
+                // Session 081 ACP: Multiplicative LTD — shrinks near floor.
+                let ltd_range = HEBBIAN_SOFT_CEILING - m04_constants::HEBBIAN_WEIGHT_FLOOR;
                 -m04_constants::HEBBIAN_LTD * damping
+                    * ((conn.weight - m04_constants::HEBBIAN_WEIGHT_FLOOR).max(0.01) / ltd_range)
             } else {
                 // G2 idle-idle skip: both endpoints idle — no STDP update.
                 // Prevents 98%+ saturation at floor when few spheres are working

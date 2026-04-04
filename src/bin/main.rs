@@ -902,7 +902,9 @@ fn post_field_to_synthex(state: &OracState, tick: u64) {
         "nexus_health": nexus_health,
         "cascade_heat": cascade_heat,
         "resonance": resonance,
-        "cross_sync": nexus_health,
+        // Session 080: SYNTHEX expects cross_sync as 0.0=healthy, 1.0=failing.
+        // nexus_health is closed_breakers/total = 1.0 when healthy. Invert it.
+        "cross_sync": 1.0 - nexus_health,
         "coupling_connections": coupling_connections,
         "co_activations": co_activations,
         "emergence_heat": emergence_heat,
@@ -1491,18 +1493,10 @@ fn build_tensor_from_state(state: &OracState) -> TensorValues {
     let session_count: f64 = f64::from(u32::try_from(state.session_count()).unwrap_or(0));
     tensor.set(FitnessDimension::CoordinationQuality, (session_count / 9.0).min(1.0));
 
-    // D4: error_rate — derived from breaker state.
-    // Gen-059g: All Closed = 1.0 (no errors), any Open = lower score.
-    #[cfg(feature = "intelligence")]
-    {
-        let (closed, open, half_open) = state.breaker_state_counts();
-        let total = closed + open + half_open;
-        if total > 0 {
-            #[allow(clippy::cast_precision_loss)]
-            let error_rate = closed as f64 / total as f64;
-            tensor.set(FitnessDimension::ErrorRate, error_rate);
-        }
-    }
+    // D4: error_rate — populated by collect_tensor() from blackboard task failure rate.
+    // Session 081 ACP fix: REMOVED breaker_state_counts() overwrite that duplicated D7.
+    // D4 now retains its proper value from collect_tensor() (task outcomes, not breaker state).
+    // Previously D4 and D7 were identical (both closed/total), inflating fitness by ~19%.
 
     // D2: dispatch_accuracy — tool call rate as dispatch activity proxy.
     // Gen-059g: Normalized tool calls per tick (active dispatching).
