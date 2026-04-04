@@ -1,4 +1,4 @@
-# /sweep — Habitat Health Sweep (17 Services + ORAC + Field + Thermal)
+# /sweep — Habitat Health Sweep (12 Services + ORAC + Field + Thermal)
 
 Probe every service and subsystem in parallel. Report health, RALPH state, field coherence, thermal, STDP, and emergence.
 
@@ -15,11 +15,6 @@ ports = {
     8080: ('/api/health', 'ME'),
     8081: ('/health', 'DevOps'),
     8090: ('/api/health', 'SYNTHEX'),
-    8100: ('/health', 'K7'),
-    8101: ('/health', 'NAIS'),
-    8102: ('/health', 'Bash'),
-    8103: ('/health', 'TM'),
-    8104: ('/health', 'CCM'),
     8105: ('/health', 'TL'),
     8110: ('/health', 'CSV7'),
     8120: ('/health', 'VMS'),
@@ -39,7 +34,7 @@ def check(args):
     except Exception as e:
         return (port, name, 0, {})
 
-with ThreadPoolExecutor(max_workers=17) as pool:
+with ThreadPoolExecutor(max_workers=12) as pool:
     results = list(pool.map(check, [(p, path, name) for p, (path, name) in ports.items()]))
 
 svc_ms = (time.monotonic() - start) * 1000
@@ -52,7 +47,7 @@ for port, name, status, data in sorted(results):
         print(f'  {name}:{port} ✓')
     else:
         print(f'  {name}:{port} ✗ ({status})')
-print(f'  TOTAL: {ok}/17')
+print(f'  TOTAL: {ok}/12')
 
 # Extract ORAC data from results
 orac = next((d for p, n, s, d in results if p == 8133 and s == 200), {})

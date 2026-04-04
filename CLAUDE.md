@@ -16,9 +16,9 @@
 Run these 4 commands at the start of every new context window:
 
 1. **`/zellij-mastery`** — Zellij config, layouts, plugins, dispatch stack, keybinds
-2. **`/primehabitat`** — The Habitat: 17 services, IPC bus, memory systems, fleet
+2. **`/primehabitat`** — The Habitat: 12 services, IPC bus, memory systems, fleet
 3. **`/deephabitat`** — deep substrate: wire protocol, databases, ecosystem, tools
-4. **`/sweep`** — probes all 17 services + ORAC + thermal + field coherence
+4. **`/sweep`** — probes all 12 services + ORAC + thermal + field coherence
 
 Then read `CLAUDE.local.md` for current session state and phase tracking.
 
@@ -27,7 +27,7 @@ Then read `CLAUDE.local.md` for current session state and phase tracking.
 | Command | What It Does |
 |---------|-------------|
 | `/gate` | 4-stage quality gate: check → clippy → pedantic → test. Run before every commit. |
-| `/sweep` | Probe all 17 services + ORAC state + thermal + field coherence. |
+| `/sweep` | Probe all 12 services + ORAC state + thermal + field coherence. |
 | `/deploy-orac` | Full build → deploy → verify cycle. Encodes all traps (exit 144, cp alias, SIGPIPE). |
 | `/acp` | Adversarial Convergence Protocol: 3 rounds of distributed intelligence with gates. |
 | `/battern` | Patterned fleet batch dispatch: roles → gate → collect → synthesize. |

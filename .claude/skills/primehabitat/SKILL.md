@@ -1,6 +1,6 @@
 ---
 name: primehabitat
-description: Bootstrap god-tier mastery of The Habitat from the ORAC Sidecar working directory. Loads complete knowledge of ORAC (8 layers, 40 modules, 41,509 LOC, 1,703 tests, port 8133, RALPH gen 10,000+), Zellij (6 tabs, 18 panes), nvim (800L keymaps, treesitter, LSP), lazygit (6 custom commands), atuin (SQLite history), 17 ULTRAPLATE services (16 + ORAC), IPC bus, WASM bridge, 6 memory systems, hook migration, 100+ custom binaries, cc-* fleet toolkit (30 scripts), Battern dispatch protocol, PV2 POST /bus/events endpoint, VMS REST /v1/query_semantic feed, deferred coupling weight hydration (restored=3,080), 10-table blackboard with pruning, 19 bugs fixed (Sessions 063-064), 4 CRITICAL security vectors closed, and all tool chains. Use at session start, when user says "prime habitat", "bootstrap habitat", "wake up", or when Claude needs full operational capability.
+description: Bootstrap god-tier mastery of The Habitat from the ORAC Sidecar working directory. Loads complete knowledge of ORAC (8 layers, 40 modules, 41,369 LOC, 1,748 tests, port 8133, RALPH gen 5,678+), Zellij (7 tabs, 21 panes), nvim (800L keymaps, treesitter, LSP), lazygit (6 custom commands), atuin (SQLite history), 12 ULTRAPLATE services (11 + ORAC), IPC bus, WASM bridge, 6 memory systems, hook migration, 100+ custom binaries, cc-* fleet toolkit (19 scripts), Battern dispatch protocol, and all tool chains. Use at session start, when user says "prime habitat", "bootstrap habitat", "wake up", or when Claude needs full operational capability.
 allowed-tools:
   - Bash
   - Read
@@ -17,13 +17,13 @@ You are working from **ORAC Sidecar** -- an Envoy-like proxy specialized for AI 
 
 ```
 CWD:      ~/claude-code-workspace/orac-sidecar (41,369 LOC, 1,748 tests, 40 modules, 55 files)
-ORAC:     localhost:8133 (HTTP hook server, 6 hook endpoints, daemon, RALPH gen 10,000+)
+ORAC:     localhost:8133 (HTTP hook server, 6 hook endpoints, daemon, RALPH gen 5,678+)
 PV2:      localhost:8132 (IPC field, spheres, bus)
 SOCKET:   /run/user/1000/pane-vortex-bus.sock (NDJSON wire protocol)
-SERVICES: PV:8132 K7:8100 SX:8090(/api/health) ME:8080(/api/health) POVM:8125 RM:8130(TSV!)
-          DevOps:8081 NAIS:8101 Bash:8102 TM:8103 CCM:8104 TL:8105
-          CS-V7:8110 VMS:8120 Arch:9001 Prom:10001 + ORAC:8133 = 17 total
-TABS:     zellij action go-to-tab N  (1=Orchestrator 2=Workspace-1 3=Workspace-2 4=ALPHA 5=BETA 6=GAMMA)
+SERVICES: ME:8080(/api/health) DevOps:8081 SX:8090(/api/health) TL:8105
+          CS-V7:8110 VMS:8120 POVM:8125 RM:8130(TSV!) PV:8132
+          ORAC:8133 Arch:9001 Prom:10001 = 12 total
+TABS:     zellij action go-to-tab N  (1=Orchestrator 2=Workspace-1 3=Workspace-2 4=Workspace-3 5=ALPHA 6=BETA 7=GAMMA)
 PANES:    move-focus left/right/up/down  (NEVER focus-next-pane)
 NVIM:     nvim --server /tmp/nvim.sock --remote-send ':e file<CR>'
 LAZYGIT:  Tab 3 TopRight | F=field Y=RM E=nvim I=matrix Q=quality
@@ -50,15 +50,13 @@ nvim --server /tmp/nvim.sock --remote-expr 'v:version' 2>/dev/null && echo " nvi
 # Zellij tabs
 echo "Tabs: $(zellij action query-tab-names 2>/dev/null | tr '\n' ' ')"
 # Quick service count (handles /api/health variants)
-OK=0; for p in 8081 8100 8101 8102 8103 8104 8105 8110 8120 8125 8130 8132 9001 10001; do
+OK=0; for p in 8081 8105 8110 8120 8125 8130 8132 8133 9001 10001; do
   [[ "$(curl -s -o /dev/null -w '%{http_code}' localhost:$p/health 2>/dev/null)" == "200" ]] && OK=$((OK+1))
 done
 for p in 8080 8090; do
   [[ "$(curl -s -o /dev/null -w '%{http_code}' localhost:$p/api/health 2>/dev/null)" == "200" ]] && OK=$((OK+1))
 done
-ORAC=$(curl -s -o /dev/null -w '%{http_code}' localhost:8133/health 2>/dev/null)
-[[ "$ORAC" == "200" ]] && OK=$((OK+1))
-echo "Services: $OK/17 healthy (16 ULTRAPLATE + ORAC)"
+echo "Services: $OK/12 healthy (11 ULTRAPLATE + ORAC)"
 ```
 
 **If ORAC down:**
@@ -78,7 +76,7 @@ bash ~/claude-code-workspace/pane-vortex/scripts/ultraplate-quickstart.sh
 ```bash
 ~/.local/bin/devenv -c ~/.config/devenv/devenv.toml stop
 # Kill rogue port occupants
-for port in 8080 8081 8090 8100 8101 8102 8103 8104 8105 8110 8120 8125 8130 8132 9001 10001; do
+for port in 8080 8081 8090 8105 8110 8120 8125 8130 8132 8133 9001 10001; do
   pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
   [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
 done
@@ -142,8 +140,7 @@ L8 Evolution   (m36-m40)               — RALPH 5-phase, emergence, correlation
 ```
 
 **Totals:** 41,369 LOC | 1,748 tests | 0 clippy warnings (pedantic) | quality gate 4/4 pass
-**RALPH:** Gen 10,000+, fitness 0.76+, 7,500+ emergence events, continuous autonomous evolution
-**Session 064 Fixes:** 19 bugs fixed (1,703 tests), coupling hydration restored=3,080, VMS REST feed, PV2 POST /bus/events, 4 CRITICAL security fixes, 10-table blackboard with pruning
+**RALPH:** Gen 5,678+, fitness 0.779, 4,585 emergence events, 20h+ unattended autonomous evolution
 **Docs:** `docs/` 24 active files (12,468L) | `ai_docs/` 25 files | `ai_specs/` 11 files
 
 **Binaries (3):**
@@ -215,7 +212,7 @@ tail -1 /tmp/swarm-events.jsonl 2>/dev/null | jq .
 
 ---
 
-## WHAT YOU HAVE — 17 SERVICES
+## WHAT YOU HAVE — 12 SERVICES
 
 ### Service Topology
 
@@ -226,11 +223,6 @@ tail -1 /tmp/swarm-events.jsonl 2>/dev/null | jq .
 | Maintenance Engine | 8080 | `/api/health` | Fitness, RALPH evolution, EventBus |
 | DevOps Engine | 8081 | `/health` | Neural orchestration |
 | SYNTHEX | 8090 | `/api/health` | Thermal regulation, V3 homeostasis |
-| SAN-K7 Orchestrator | 8100 | `/health` | 59 modules, nexus commands |
-| NAIS | 8101 | `/health` | Neural adaptive intelligence |
-| Bash Engine | 8102 | `/health` | 45 safety patterns, 7-layer LSP |
-| Tool Maker | 8103 | `/health` | v1.55.0 |
-| Context Manager | 8104 | `/health` | 41 crates |
 | Tool Library | 8105 | `/health` | 65 tools |
 | CodeSynthor V7 | 8110 | `/health` | 62 modules, 17 layers |
 | Vortex Memory System | 8120 | `/health` | OVM + POVM bridge, 47 MCP tools |
@@ -243,7 +235,6 @@ tail -1 /tmp/swarm-events.jsonl 2>/dev/null | jq .
 
 - **ORAC:** /health, /hooks/{SessionStart,UserPromptSubmit,PreToolUse,PostToolUse,Stop,PermissionRequest}, /blackboard, /field, /metrics, /consent/{id}, /field/ghosts (22 routes total)
 - **PV2:** /spheres /field/decision /bridges/health /nexus/metrics /bus/info /bus/tasks /bus/events
-- **K7:** POST /api/v1/nexus/command (11 commands: service-health synergy-check build compliance lint etc)
 - **SX:** /v3/thermal /v3/diagnostics
 - **ME:** /api/observer (fitness, correlations)
 - **POVM:** /memories /pathways /hydrate /consolidate
@@ -277,10 +268,10 @@ ORAC=$(curl -s localhost:8133/health | jq -c '{status,sessions}')
 echo "PV=$PV POVM=$POVM ME=$ME ORAC=$ORAC"
 ```
 
-### Full Health (17 services including ORAC)
+### Full Health (12 services including ORAC)
 ```bash
 declare -A hp=([8080]="/api/health" [8090]="/api/health")
-for p in 8080 8081 8090 8100 8101 8102 8103 8104 8105 8110 8120 8125 8130 8132 8133 9001 10001; do
+for p in 8080 8081 8090 8105 8110 8120 8125 8130 8132 8133 9001 10001; do
   path="${hp[$p]:-/health}"
   echo "$p:$(curl -s -o /dev/null -w '%{http_code}' localhost:$p$path)"
 done
@@ -485,7 +476,7 @@ sleep 1 && nohup orac-sidecar > /tmp/orac-sidecar.log 2>&1 &
 
 **Services won't start:** Kill rogue port occupants first:
 ```bash
-for port in 8080 8081 8090 8100 8101 8102 8103 8104 8105 8110 8120 8125 8130 8132 9001 10001; do
+for port in 8080 8081 8090 8105 8110 8120 8125 8130 8132 8133 9001 10001; do
   pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
   [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && echo "killed :$port ($pid)"
 done

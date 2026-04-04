@@ -15,14 +15,14 @@
 Run these 4 commands at the start of every new context window:
 
 1. `/zellij-mastery` — Zellij config, layouts, plugins, dispatch stack, keybinds
-2. `/primehabitat` — The Habitat: 17 services, IPC bus, memory systems, fleet
+2. `/primehabitat` — The Habitat: 12 services, IPC bus, memory systems, fleet
 3. `/deephabitat` — deep substrate: wire protocol, databases, ecosystem, tools
-4. `/sweep` — probes all 17 services + ORAC + thermal + field coherence
+4. `/sweep` — probes all 12 services + ORAC + thermal + field coherence
 
 Then read this file for ORAC-specific session context.
 
 ### Resume State
-- ORAC running on :8133 with RALPH gen=12,100+, fitness=0.78+, 17/17 services
+- ORAC running on :8133 with RALPH gen=12,100+, fitness=0.78+, 12/12 services
 - Use slash commands: `/gate`, `/sweep`, `/deploy-orac`, `/acp`, `/battern`
 - Coupling hydration: deferred, restored=3,660. VMS feed: REST /v1/query_semantic.
 - PV2 POST /bus/events: deployed. PV2 decision: NeedsDivergence (unblocked).
@@ -31,7 +31,7 @@ Then read this file for ORAC-specific session context.
 | Command | Purpose |
 |---------|---------|
 | `/gate` | Quality gate (4 stages, zero tolerance) |
-| `/sweep` | Health sweep (17 services + ORAC + thermal + field) |
+| `/sweep` | Health sweep (12 services + ORAC + thermal + field) |
 | `/deploy-orac` | Build + deploy cycle (encodes all traps) |
 | `/acp` | Adversarial Convergence Protocol (3 rounds) |
 | `/battern` | Fleet batch dispatch (roles + gates + collect) |
@@ -649,7 +649,7 @@ Relay chain: 4/4 legs verified (Orchestrator→ALPHA→BETA→GAMMA).
 
 **MANDATORY — execute these steps at the start of EVERY new context window:**
 
-1. **Run `/primehabitat`** — loads The Habitat: Zellij tabs, 16 services, IPC bus, memory systems
+1. **Run `/primehabitat`** — loads The Habitat: Zellij tabs, 12 services, IPC bus, memory systems
 2. **Run `/deephabitat`** — loads deep substrate: wire protocol, databases, ecosystem, tools
 3. **Read this file** (`CLAUDE.local.md`) — current state, phase tracking
 4. **Read `ORAC_PLAN.md`** — full architecture and build phases
@@ -683,7 +683,7 @@ ORAC is an Envoy-like proxy specialized for AI agent traffic — replacing the V
 All 19 fixes complete. All 40 modules wired. Focus shifts to **production hardening** and **metabolic activation**.
 
 **Priority order:**
-1. **DevEnv registration** — Register orac-sidecar as service #18 in devenv.toml (port 8133, batch 5)
+1. **DevEnv registration** — Register orac-sidecar in devenv.toml (port 8133, batch 5)
 2. **IPC client live connect** — Connect m07 to PV2 Unix socket for event-driven coordination (currently HTTP poll)
 3. **SYNTHEX thermal activation** — Investigate why thermal=0.0 (all heat sources dormant)
 4. **RALPH generation advancement** — Run coupling steps to generate fitness improvement proposals

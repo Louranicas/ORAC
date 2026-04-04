@@ -1,6 +1,6 @@
 ---
 name: deephabitat
-description: Deep substrate mastery for The Habitat from the ORAC Sidecar working directory. Covers ORAC internals (V2 wire protocol state machine, 10 blackboard tables with pruning, 6 hook handlers, 5 bridge clients, RALPH 5-phase evolution gen 10,000+, 12D fitness tensor), cross-database architecture (173 DBs, 6 paradigms), ORAC config files (default/dev/prod/hooks/bridges TOML), HooksConfig for permission policy, deferred coupling weight hydration (restored=3,080), VMS REST /v1/query_semantic feed (660 bytes), PV2 POST /bus/events endpoint, Zellij plugins, nvim autocmds, devenv batches, 100+ custom binaries (incl 30 cc-*/fleet-* scripts), Battern dispatch protocol, vault navigation, service topology, 19 bugs fixed (Sessions 063-064), 4 CRITICAL security fixes (SEC-001 through SEC-004), and ORAC-specific anti-patterns. Triggers on deep habitat, deep exploration, substrate, wire protocol, cross-db, database architecture, devenv batches, custom binaries, ORAC internals, bridge protocol, evolution chamber, blackboard schema, hook internals, cc toolkit, battern, fleet intelligence, or when Claude needs substrate-level knowledge beyond what primehabitat provides.
+description: Deep substrate mastery for The Habitat from the ORAC Sidecar working directory. Covers ORAC internals (V2 wire protocol state machine, 10 blackboard tables, 6 hook handlers, 4 bridge clients, RALPH 5-phase evolution gen 5,678+, 12D fitness tensor), cross-database architecture (166 DBs, 6 paradigms), ORAC config files (default/dev/prod/hooks/bridges TOML), Zellij plugins, nvim autocmds, devenv batches, 100+ custom binaries (incl 19 cc-* fleet intelligence scripts), Battern dispatch protocol, vault navigation, service topology, and ORAC-specific anti-patterns. Triggers on deep habitat, deep exploration, substrate, wire protocol, cross-db, database architecture, devenv batches, custom binaries, ORAC internals, bridge protocol, evolution chamber, blackboard schema, hook internals, cc toolkit, battern, fleet intelligence, or when Claude needs substrate-level knowledge beyond what primehabitat provides.
 allowed-tools:
   - Bash
   - Read
@@ -29,12 +29,12 @@ habitat-probe full                  # Everything
 
 ```
 ORAC:     localhost:8133 | 8 layers, 40 modules, 41,369 LOC, 1,748 tests
-RALPH:    Gen 10,000+, fitness 0.76+, 7,500+ emergence events, continuous evolution
+RALPH:    Gen 5,678+, fitness 0.779, 4,585 emergence events, 20h+ unattended
 PIPE:     /run/user/1000/pane-vortex-bus.sock | NDJSON V2 | 10 ClientFrames, 6 ServerFrames
 WASM:     FIFO /tmp/swarm-commands.pipe → ring /tmp/swarm-events.jsonl (1K cap)
 CONFIG:   config/{default,dev,prod,hooks,bridges}.toml (figment overlay)
-CROSS-DB: 173 DBs, 6 paradigms | See references/databases.md
-DEVENV:   5 batches, 18 registered, 16 active + ORAC = 17 | See references/ecosystem.md
+CROSS-DB: 166 DBs, 6 paradigms | See references/databases.md
+DEVENV:   3 batches, 12 registered, 12 active (incl ORAC) | See references/ecosystem.md
 BINARIES: 100+ at ~/.local/bin/ (incl 19 cc-* fleet scripts, fleet-star, orac-{sidecar,probe,client})
 FLEET:    L1 fleet-nav → L2 pane-ctl → L3 fleet-ctl → L4 cc-* toolkit → L5 Battern protocol
 SCHEMAS:  .claude/schemas/{hook_request,hook_response,permission_policy,bus_event,bus_frame}.json
@@ -86,7 +86,7 @@ Client                          Server (PV2 bus)
 
 ### Blackboard Schema (m26_blackboard — 919 LOC, rusqlite)
 
-10 tables in SQLite (WAL mode, in-memory for tests, with pruning for hebbian_summary/consent_audit):
+5 tables in SQLite (WAL mode, in-memory for tests):
 
 ```sql
 pane_status      (pane_id PK, status, last_seen, phase, tool_name)
@@ -329,18 +329,6 @@ sqlite3 -header -column ~/claude-code-workspace/developer_environment_manager/sy
 
 ## SERVICE TOPOLOGY (Deep)
 
-### SAN-K7 Nexus Commands (10 working)
-```bash
-# TC7 Chain — all 4 in ~19ms
-for cmd in service-health synergy-check best-practice deploy-swarm; do
-  curl -s -X POST localhost:8100/api/v1/nexus/command \
-    -H "Content-Type: application/json" \
-    -d "{\"command\":\"$cmd\",\"params\":{}}" | jq -c '.data.output | {command: "'$cmd'", status}'
-done
-```
-
-Also: memory-consolidate, lint, compliance, build, pattern-search, module-status
-
 ### Cross-Service Bridge State
 - PV bridges combined_effect ~1.017 (nexus 1.02, synthex 0.994, me 1.00)
 - SYNTHEX thermal: T target 0.50, PID active, heat sources: Hebbian + CrossSync
@@ -354,15 +342,14 @@ Also: memory-consolidate, lint, compliance, build, pattern-search, module-status
 
 ## ECOSYSTEM
 
-### DevEnv Batches (5 layers + ORAC)
+### DevEnv Batches (3 layers + ORAC)
 ```
 Batch 1 (no deps):  devops-engine, codesynthor-v7, povm-engine, reasoning-memory
-Batch 2 (needs B1): synthex, san-k7, maintenance-engine, architect-agent, prometheus-swarm
-Batch 3 (needs B2): nais, bash-engine, tool-maker
-Batch 4 (needs B3): claude-context-manager, tool-library
-Batch 5 (needs B4): vortex-memory-system, pane-vortex
-ORAC (needs B5):    orac-sidecar (depends on pane-vortex + povm-engine)
+Batch 2 (needs B1): synthex, maintenance-engine, architect-agent, prometheus-swarm, tool-library
+Batch 3 (needs B2): vortex-memory-system, pane-vortex
+ORAC (needs B3):    orac-sidecar (depends on pane-vortex + povm-engine)
 ```
+**Retired (7):** SAN-K7 (8100), NAIS (8101), Bash Engine (8102), Tool Maker (8103), Context Manager (8104), Library Agent (8083), Sphere-Vortex
 
 Binary: `~/.local/bin/devenv` | Config: `~/.config/devenv/devenv.toml` (518L)
 Storm protection: 5 restarts in 60s = storm | Graceful shutdown: 30s
