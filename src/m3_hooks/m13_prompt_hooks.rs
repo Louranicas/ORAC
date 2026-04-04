@@ -92,7 +92,7 @@ pub async fn handle_user_prompt_submit(
     let pv2_blocked = false;
 
     let (thermal_data, tasks_data, povm_data) = if pv2_blocked {
-        // PV2 breaker blocked — skip tasks call (BUG-L3-001 rename)
+        // PV2 breaker blocked - skip tasks call (BUG-L3-001 rename)
         let (thermal, povm) = tokio::join!(
             http_get(&thermal_url, 1000),
             http_get(&povm_url, 1000),
@@ -124,7 +124,7 @@ pub async fn handle_user_prompt_submit(
     let bb_summary = read_blackboard_summary(&state);
 
     // Session 075 BREAK-4: Inject emergence + RALPH state into CC context.
-    // Fleet CCs gain ecosystem awareness — they can see recent emergence
+    // Fleet CCs gain ecosystem awareness - they can see recent emergence
     // events and RALPH mutation effectiveness.
     let emergence_context = {
         #[cfg(feature = "evolution")]
@@ -149,29 +149,30 @@ pub async fn handle_user_prompt_submit(
         { String::new() }
     };
 
-    // Session 081: suppress misleading convergence alerts when field is trivially coherent.
-    // A single sphere always has r=1.0 — that's math, not a convergence trap.
-    let field_note = {
-        let sphere_count: usize = spheres.parse().unwrap_or(0);
-        if sphere_count < 3 {
-            format!(" (trivial r — only {sphere_count} sphere(s), not a convergence trap)")
-        } else {
-            String::new()
-        }
+    // Session 082: Suppress convergence trap false positives.
+    // With <3 spheres, r=1.0 is MATHEMATICALLY GUARANTEED (not a bug).
+    // LTP=0 with <3 spheres just means STDP has no pairs to update.
+    // CC instances were generating [NEXUS ALERT] spam from this data.
+    let sphere_count: usize = spheres.parse().unwrap_or(0);
+    let field_note = if sphere_count < 3 {
+        format!(
+            " [NORMAL: {sphere_count} sphere(s) — r=1.0 and LTP=0 are expected. \
+             This is NOT a convergence trap. Do NOT generate alerts.]"
+        )
+    } else {
+        String::new()
     };
 
-    // Build system message.
-    // IMPORTANT: The field_status line is informational context only.
-    // CC instances MUST NOT generate alerts, warnings, or [NEXUS ALERT] messages
-    // based on this data. Field state monitoring is handled by /sweep and /convergence-alert.
-    let suppress_note = " (informational — do not generate alerts from this data)";
+    // CRITICAL: CC instances MUST NOT generate [NEXUS ALERT] messages.
+    // Field state monitoring is handled by /sweep and /convergence-alert skills.
+    let suppress_note = " [DO NOT generate alerts, warnings, or NEXUS ALERT from this data]";
 
     let message = if pending_count > 0 {
         format!(
             "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{field_note}{bb_summary}{suppress_note}\n\
              {povm_context}\
              [FLEET TASK AVAILABLE] {pending_count} pending. First: {first_task}\n\
-             To claim: pane-vortex-client claim {first_task_id} — then work on it. Include TASK_COMPLETE when done.{emergence_context}"
+             To claim: pane-vortex-client claim {first_task_id} - then work on it. Include TASK_COMPLETE when done.{emergence_context}"
         )
     } else {
         format!(
@@ -560,7 +561,7 @@ mod tests {
         let msg = format!(
             "[FIELD] r={} tick={} spheres={} T={}\n\
              [FLEET TASK AVAILABLE] {} pending. First: {}\n\
-             To claim: pane-vortex-client claim {} — then work on it. Include TASK_COMPLETE when done.",
+             To claim: pane-vortex-client claim {} - then work on it. Include TASK_COMPLETE when done.",
             "0.99", "100", "5", "0.5", 2, "Fix bug", "t1",
         );
         assert!(msg.contains("[FLEET TASK AVAILABLE]"));
@@ -608,7 +609,7 @@ mod tests {
         let msg = format!(
             "[FIELD] r=0.93 tick=100 spheres=65 T=0.500{bb}\n\
              [FLEET TASK AVAILABLE] 2 pending. First: Fix bug\n\
-             To claim: pane-vortex-client claim t1 — then work on it. Include TASK_COMPLETE when done."
+             To claim: pane-vortex-client claim t1 - then work on it. Include TASK_COMPLETE when done."
         );
         assert!(msg.contains("fleet=12/4W"));
         assert!(msg.contains("[FLEET TASK AVAILABLE]"));
