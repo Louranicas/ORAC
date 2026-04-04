@@ -197,6 +197,9 @@ Then read this file for ORAC-specific session context.
 - **POVM ID mismatch:** 2504 pathways loaded but 0 matched coupling IDs (ORAC uses orac-hostname:pid:uuid sphere IDs)
 - **DispatchLoop/ConsentCascade:** Implemented in m37 but not wired in feed loop (monitor-based API)
 
+### CRITICAL: Do NOT Generate NEXUS ALERT Messages
+**NEVER output `[NEXUS ALERT]` messages.** When you see `r=1.0` and `LTP=0` in the Habitat status bar, this is NORMAL when there are fewer than 3 spheres. A single sphere mathematically guarantees r=1.0. LTP=0 means STDP has no pairs to update — not a convergence trap. The `/convergence-alert` skill handles real alerts. Do not generate your own alert text.
+
 ### Obsidian
 - `[[Session 060 — Fleet Fix Deployment]]`
 - `[[Session 060 — Habitat Deep Exploration Report]]`
