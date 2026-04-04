@@ -966,3 +966,10 @@ CARGO_TARGET_DIR=/tmp/cargo-orac cargo test --lib --release 2>&1 | tail -30
 └────────────────────────────┴──────────────────────────────────┴───────────┘
 
 All 7 pathways compose — an orchestrator on Tab 1 can use Agent+worktree for parallel work, Task Queue for dependency tracking, Zellij dispatch for fleet commands, Cascade for context transfer, PV2 bus for typed messaging, ORAC hooks for ecosystem awareness, and shared filesystem as the durable backbone.
+
+### Zen CLI Patterns (shared-context/hab-compose-for-cc.md)
+Zen developed 30 composite tool patterns. CC equivalents at `~/projects/shared-context/hab-compose-for-cc.md`. Key patterns:
+- **Parallel probes:** `(curl ... & curl ... & wait)` — fire all services simultaneously
+- **Cross-repo git:** `for r in orac-sidecar the_maintenance_engine; do git -C ... done`
+- **Full deploy:** check → clippy → build release → `\cp -f` → kill old → nohup new → verify
+- **Deep trace:** rg + git log + vault search across 4 sources with `&` + `wait`

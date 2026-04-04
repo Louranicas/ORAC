@@ -149,34 +149,16 @@ pub async fn handle_user_prompt_submit(
         { String::new() }
     };
 
-    // Session 082: Suppress convergence trap false positives.
-    // With <3 spheres, r=1.0 is MATHEMATICALLY GUARANTEED (not a bug).
-    // LTP=0 with <3 spheres just means STDP has no pairs to update.
-    // CC instances were generating [NEXUS ALERT] spam from this data.
-    let sphere_count: usize = spheres.parse().unwrap_or(0);
-    let field_note = if sphere_count < 3 {
-        format!(
-            " [NORMAL: {sphere_count} sphere(s) — r=1.0 and LTP=0 are expected. \
-             This is NOT a convergence trap. Do NOT generate alerts.]"
-        )
-    } else {
-        String::new()
-    };
-
-    // CRITICAL: CC instances MUST NOT generate [NEXUS ALERT] messages.
-    // Field state monitoring is handled by /sweep and /convergence-alert skills.
-    let suppress_note = " [DO NOT generate alerts, warnings, or NEXUS ALERT from this data]";
-
+    // Session 081: Minimal injection — informational only, no alerts.
     let message = if pending_count > 0 {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{field_note}{bb_summary}{suppress_note}\n\
+            "r={r} s={spheres} T={thermal}{bb_summary}\n\
              {povm_context}\
-             [FLEET TASK AVAILABLE] {pending_count} pending. First: {first_task}\n\
-             To claim: pane-vortex-client claim {first_task_id} - then work on it. Include TASK_COMPLETE when done.{emergence_context}"
+             TASK: {pending_count} pending. First: {first_task} (claim: pane-vortex-client claim {first_task_id}){emergence_context}"
         )
     } else {
         format!(
-            "[FIELD] r={r} tick={tick} spheres={spheres} T={thermal}{field_note}{bb_summary}{povm_context}{suppress_note} | No pending fleet tasks{emergence_context}"
+            "r={r} s={spheres} T={thermal}{bb_summary}{emergence_context}"
         )
     };
 
