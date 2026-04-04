@@ -38,3 +38,7 @@ pub mod m24_povm_bridge;
 pub mod m25_rm_bridge;
 /// SQLite shared fleet state — pane status, task history, agent cards
 pub mod m26_blackboard;
+/// DevOps Engine bridge — pipeline health (Session 082)
+pub mod m27_devops_bridge;
+/// Vortex Memory System bridge — morphogenic cycle metrics (Session 082)
+pub mod m28_vms_bridge;
